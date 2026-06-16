@@ -1,0 +1,75 @@
+{
+  "name": "bob-powertoys",
+  "displayName": "IBM Bob - PowerToys",
+  "description": "Enhanced development tools for IBM Bob: debugging, terminal access, and workspace utilities",
+  "version": "0.2.0",
+  "icon": "assets/icon.png",
+  "license": "MIT",
+  "publisher": "peerpalo",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/peerpalo/bob-powertoys"
+  },
+  "author": {
+    "name": "Pierpaolo Battaglione",
+    "email": "pierpaolo.battaglione@ibm.com"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Debuggers",
+    "Other"
+  ],
+  "activationEvents": [
+    "onDebug",
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "bob-powertoys.showStatus",
+        "title": "IBM Bob - PowerToys: Show Status"
+      }
+    ],
+    "configuration": {
+      "title": "IBM Bob - PowerToys",
+      "properties": {
+        "breakpointNotifications": {
+          "title": "Breakpoint Notifications",
+          "type": "string",
+          "enum": [
+            "disabled",
+            "bobOnly",
+            "all"
+          ],
+          "enumDescriptions": [
+            "Never notify Bob when breakpoints are hit",
+            "Only notify Bob for breakpoints set through Bob's tools (default)",
+            "Notify Bob for all breakpoint hits, regardless of how they were set"
+          ],
+          "default": "bobOnly",
+          "description": "Controls when Bob is automatically notified about breakpoint hits"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "pretest": "npm run compile && npm run lint",
+    "lint": "eslint src --ext ts",
+    "test": "node ./out/test/runTest.js"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "@types/vscode": "^1.85.0",
+    "@typescript-eslint/eslint-plugin": "^6.13.0",
+    "@typescript-eslint/parser": "^6.13.0",
+    "@vscode/vsce": "^3.9.2",
+    "eslint": "^8.54.0",
+    "typescript": "^5.8.0"
+  }
+}
