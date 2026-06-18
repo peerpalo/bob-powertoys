@@ -7,6 +7,8 @@ import { registerDebugControlTools } from './tools/debugControl.js';
 import { registerUniverseAnswerTool } from './tools/universeAnswer.js';
 import { registerDebugAdapterTracker } from './debugAdapter.js';
 
+const BOB_EXTENSION_ID = 'IBM.bob-code';
+
 let statusBarItem: vscode.StatusBarItem;
 
 export function activate(context: vscode.ExtensionContext) {
@@ -15,38 +17,24 @@ export function activate(context: vscode.ExtensionContext) {
   // Register terminal capture
   registerTerminalCapture(context);
 
-  // Wait for Bob to be fully active, then register our tools
-  const bobExtension = vscode.extensions.getExtension('IBM.bob-code');
-  
-  if (!bobExtension) {
-    console.error('[Bob - PowerToys] Bob extension not found - tools will not be available');
-    showStatusBarError();
-    return;
-  }
-
-  if (!bobExtension.isActive) {
-    console.log('[Bob - PowerToys] Waiting for Bob to activate...');
-    const disposable = vscode.extensions.onDidChange(() => {
-      const ext = vscode.extensions.getExtension('IBM.bob-code');
-      if (ext?.isActive) {
-        disposable.dispose();
-        registerAllTools(context);
-      }
-    });
-    context.subscriptions.push(disposable);
-  } else {
-    registerAllTools(context);
-  }
-
-  // Create status bar item
+  // Create status bar item with loading state
   statusBarItem = vscode.window.createStatusBarItem(
     vscode.StatusBarAlignment.Right,
     100
   );
-  statusBarItem.text = '$(debug-alt) Bob - PowerToys';
+  statusBarItem.text = '$(loading~spin) Bob - PowerToys';
   statusBarItem.command = 'bob-powertoys.showStatus';
   statusBarItem.show();
   context.subscriptions.push(statusBarItem);
+
+  // Activate Bob (no-op if already active), then register once it's ready
+  const bobExtension = vscode.extensions.getExtension(BOB_EXTENSION_ID);
+  if (!bobExtension) {
+    console.error('[Bob - PowerToys] Bob extension not found - tools will not be available');
+    showStatusBarError();
+  } else {
+    bobExtension.activate().then(() => registerAllTools(context));
+  }
 
   // Register status command
   context.subscriptions.push(
@@ -58,14 +46,7 @@ export function activate(context: vscode.ExtensionContext) {
 
 function registerAllTools(context: vscode.ExtensionContext) {
   try {
-    const bobExtension = vscode.extensions.getExtension('IBM.bob-code');
-    
-    if (!bobExtension?.isActive) {
-      console.error('[Bob - PowerToys] Bob extension not active');
-      return;
-    }
-
-    const bobExports = bobExtension.exports;
+    const bobExports = vscode.extensions.getExtension(BOB_EXTENSION_ID)!.exports;
 
     if (!bobExports?.registerSource) {
       console.error('[Bob - PowerToys] Bob registerSource API not found');
@@ -75,8 +56,7 @@ function registerAllTools(context: vscode.ExtensionContext) {
 
     // Register centralized debug adapter tracker (captures debug output and notifies Bob)
     console.log('[Bob - PowerToys] Registering centralized debug adapter tracker...');
-    const debugAdapterDisposable = registerDebugAdapterTracker(bobExports);
-    context.subscriptions.push(debugAdapterDisposable);
+    context.subscriptions.push(registerDebugAdapterTracker(bobExports));
 
     // Register our tool source with Bob
     console.log('[Bob - PowerToys] Registering tool source with Bob...');
@@ -98,13 +78,10 @@ function registerAllTools(context: vscode.ExtensionContext) {
 
     console.log('[Bob - PowerToys] Successfully registered 23 tools with Bob');
     console.log('[Bob - PowerToys] Automatic breakpoint notifications enabled');
-    
-    // Update status bar
-    if (statusBarItem) {
-      statusBarItem.text = 'Bob - PowerToys [Active]';
-      statusBarItem.tooltip = 'Bob - PowerToys active: 23 tools + automatic breakpoint notifications';
-    }
 
+    if (statusBarItem) {
+      statusBarItem.text = '$(debug-alt) Bob - PowerToys';
+    }
   } catch (error) {
     console.error('[Bob - PowerToys] Error registering tools:', error);
     showStatusBarError();
@@ -113,8 +90,7 @@ function registerAllTools(context: vscode.ExtensionContext) {
 
 function showStatusBarError() {
   if (statusBarItem) {
-    statusBarItem.text = 'Bob - PowerToys [Error]';
-    statusBarItem.tooltip = 'Bob - PowerToys - Failed to register tools. Check console for details.';
+    statusBarItem.text = '$(error) Bob - PowerToys';
   }
 }
 
