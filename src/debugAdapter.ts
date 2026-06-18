@@ -58,7 +58,7 @@ async function safeNotify(task: any, message: string): Promise<boolean> {
 
     return true;
   } catch (error) {
-    console.error('[Bob PowerToys] Notify failed:', error);
+    console.error('[Bob - PowerToys] Notify failed:', error);
     return false;
   }
 }

@@ -2,7 +2,7 @@
   "name": "bob-powertoys",
   "displayName": "IBM Bob - PowerToys",
   "description": "Enhanced development tools for IBM Bob: debugging, terminal access, and workspace utilities",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "icon": "assets/icon.png",
   "license": "MIT",
   "publisher": "peerpalo",
