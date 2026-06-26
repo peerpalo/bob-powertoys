@@ -117,7 +117,7 @@ For detailed tool documentation and parameters, see [DEVELOPMENT.md](DEVELOPMENT
 
 ## Requirements
 
-- IBM Bob 1.0.3 or higher
+- IBM Bob 2.0.0 or higher
 - Node.js 20.x or higher
 
 ## Development
