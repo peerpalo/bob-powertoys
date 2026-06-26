@@ -883,7 +883,7 @@ for (const line of output) {
 ### Prerequisites
 
 - Node.js 20.x or higher
-- IBM Bob 1.0.3 or higher
+- IBM Bob 2.0.0 or higher
 - TypeScript 5.3.2 or higher
 
 ### Installation
