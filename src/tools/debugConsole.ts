@@ -33,41 +33,46 @@ async function resolveTopFrameId(session: vscode.DebugSession): Promise<number |
 export class EvaluateExpressionTool {
   static id = 'evaluate_expression';
   groups = ['read'];
-  parameters = [
-    { name: 'expression', required: true,  type: 'string', description: 'Expression to evaluate in the current debug context', usage: 'myVariable' },
-    { name: 'frameId',    required: false, type: 'number', description: 'Stack frame ID (defaults to top frame)', usage: '1' },
-    { name: 'context',    required: false, type: 'string', description: 'Evaluation context: repl, watch, or hover (default: repl)', usage: 'repl' },
-    { name: 'expand',     required: false, type: 'string', description: 'Expand object references: true or false (default: true)', usage: 'true' },
-  ];
+  permission = 'read';
 
   getId() { return EvaluateExpressionTool.id; }
 
-  getDescription(_options?: any): string {
-    return `## evaluate_expression
-Description: Evaluate an expression in the current debug session context. Requires the debugger to be paused at a breakpoint. Automatically expands object references.
-
-Parameters:
-- expression: (required) string. The expression to evaluate.
-- frameId: (optional) number. Stack frame ID. Defaults to the top frame.
-- context: (optional) string. Evaluation context — repl, watch, or hover. Default: repl.
-- expand: (optional) string. Whether to expand object references. Default: true.
-
-Usage:
-<evaluate_expression>
-<expression>myVariable</expression>
-<context>repl</context>
-</evaluate_expression>`;
+  getDescription(_env?: any): string {
+    return 'Evaluate an expression in the current debug session context. Requires the debugger to be paused at a breakpoint. Automatically expands object references.';
   }
 
   getCostEffectiveDescription(): string {
     return 'Evaluate an expression in the active debug session (requires breakpoint pause)';
   }
 
-  toolUseDescription(params: any): string {
-    return `Evaluating: ${params?.expression ?? '...'}`;
+  // Shared param definition
+  private static readonly PARAMS = [
+    { name: 'expression', required: true,  type: 'string', detail: 'Expression to evaluate in the current debug context', description: 'Expression to evaluate in the current debug context', usage: 'myVariable' },
+    { name: 'frameId',    required: false, type: 'number', detail: 'Stack frame ID (defaults to top frame)', description: 'Stack frame ID (defaults to top frame)', usage: '1' },
+    { name: 'context',    required: false, type: 'string', detail: 'Evaluation context: repl, watch, or hover (default: repl)', description: 'Evaluation context: repl, watch, or hover (default: repl)', usage: 'repl' },
+    { name: 'expand',     required: false, type: 'string', detail: 'Expand object references: true or false (default: true)', description: 'Expand object references: true or false (default: true)', usage: 'true' },
+  ];
+
+  // Property — read by toolToOpenAi(e).parameters
+  parameters = EvaluateExpressionTool.PARAMS;
+
+  // Method — read by the newer getParameters(env) paths
+  getParameters(_env?: any): any[] {
+    return EvaluateExpressionTool.PARAMS;
+  }
+
+  getLabels(args: Record<string, any>) {
+    const expr = args?.expression ?? '...';
+    return {
+      displayName: `Evaluate: ${expr}`,
+      running: `Evaluating: ${expr}`,
+      success: `Evaluated: ${expr}`,
+      error: `Failed to evaluate: ${expr}`,
+    };
   }
 
   async call(context: {
+    env: any;
     parameters: { expression: string; frameId?: number; context?: string; expand?: string };
     pushResult: (text: string) => void;
     pushError: (text: string) => void;
@@ -118,36 +123,43 @@ Usage:
 export class GetVariablesTool {
   static id = 'get_variables';
   groups = ['read'];
-  parameters = [
-    { name: 'variablesReference', required: true,  type: 'number', description: 'The variables reference ID from a previous evaluation', usage: '1' },
-    { name: 'filter',             required: false, type: 'string', description: 'Filter variables: indexed or named', usage: 'named' },
-  ];
+  permission = 'read';
 
   getId() { return GetVariablesTool.id; }
 
-  getDescription(_options?: any): string {
-    return `## get_variables
-Description: Retrieve variables for a given variables reference ID obtained from a previous evaluate_expression or get_scopes call. Use this to drill into nested objects.
-
-Parameters:
-- variablesReference: (required) number. The reference ID to expand.
-- filter: (optional) string. Filter by indexed or named variables.
-
-Usage:
-<get_variables>
-<variablesReference>1</variablesReference>
-</get_variables>`;
+  getDescription(_env?: any): string {
+    return 'Retrieve variables for a given variables reference ID obtained from a previous evaluate_expression or get_scopes call. Use this to drill into nested objects.';
   }
 
   getCostEffectiveDescription(): string {
     return 'Retrieve variables for a variables reference ID from the active debug session';
   }
 
-  toolUseDescription(params: any): string {
-    return `Getting variables for reference: ${params?.variablesReference}`;
+  // Shared param definition
+  private static readonly PARAMS = [
+    { name: 'variablesReference', required: true,  type: 'number', detail: 'The variables reference ID from a previous evaluation', description: 'The variables reference ID from a previous evaluation', usage: '1' },
+    { name: 'filter',             required: false, type: 'string', detail: 'Filter variables: indexed or named', description: 'Filter variables: indexed or named', usage: 'named' },
+  ];
+
+  // Property — read by toolToOpenAi(e).parameters
+  parameters = GetVariablesTool.PARAMS;
+
+  // Method — read by the newer getParameters(env) paths
+  getParameters(_env?: any): any[] {
+    return GetVariablesTool.PARAMS;
+  }
+
+  getLabels(args: Record<string, any>) {
+    return {
+      displayName: 'Get Variables',
+      running: `Getting variables for reference: ${args?.variablesReference ?? '...'}`,
+      success: 'Got variables',
+      error: 'Failed to get variables',
+    };
   }
 
   async call(context: {
+    env: any;
     parameters: { variablesReference: number; filter?: string };
     pushResult: (text: string) => void;
     pushError: (text: string) => void;
@@ -173,38 +185,45 @@ Usage:
 export class GetStackTraceTool {
   static id = 'get_stack_trace';
   groups = ['read'];
-  parameters = [
-    { name: 'threadId',   required: false, type: 'number', description: 'Thread ID (defaults to stopped thread)', usage: '1' },
-    { name: 'startFrame', required: false, type: 'number', description: 'Starting frame index (default: 0)', usage: '0' },
-    { name: 'levels',     required: false, type: 'number', description: 'Number of frames to retrieve (default: 20)', usage: '20' },
-  ];
+  permission = 'read';
 
   getId() { return GetStackTraceTool.id; }
 
-  getDescription(_options?: any): string {
-    return `## get_stack_trace
-Description: Retrieve the call stack for the current debug session. Shows all stack frames with file locations and line numbers.
-
-Parameters:
-- threadId: (optional) number. Thread ID. Defaults to the current stopped thread.
-- startFrame: (optional) number. Starting frame index. Default: 0.
-- levels: (optional) number. Number of frames to retrieve. Default: 20.
-
-Usage:
-<get_stack_trace>
-<levels>20</levels>
-</get_stack_trace>`;
+  getDescription(_env?: any): string {
+    return 'Retrieve the call stack for the current debug session. Shows all stack frames with file locations and line numbers.';
   }
 
   getCostEffectiveDescription(): string {
     return 'Retrieve the call stack from the active debug session';
   }
 
-  toolUseDescription(): string {
-    return 'Getting stack trace...';
+  // Shared param definition
+  private static readonly PARAMS = [
+    { name: 'threadId',   required: false, type: 'number', detail: 'Thread ID (defaults to stopped thread)', description: 'Thread ID (defaults to stopped thread)', usage: '1' },
+    { name: 'startFrame', required: false, type: 'number', detail: 'Starting frame index (default: 0)', description: 'Starting frame index (default: 0)', usage: '0' },
+    { name: 'levels',     required: false, type: 'number', detail: 'Number of frames to retrieve (default: 20)', description: 'Number of frames to retrieve (default: 20)', usage: '20' },
+  ];
+
+  // Property — read by toolToOpenAi(e).parameters
+  parameters = GetStackTraceTool.PARAMS;
+
+  // Method — read by the newer getParameters(env) paths
+  getParameters(_env?: any): any[] {
+    return GetStackTraceTool.PARAMS;
+  }
+
+  getLabels(args: Record<string, any>) {
+    const suffix = args?.threadId !== undefined ? ` (thread ${args.threadId})` : '';
+    return {
+      displayName: `Get Stack Trace${suffix}`,
+      running: `Getting stack trace${suffix}...`,
+      success: `Got stack trace${suffix}`,
+      error: 'Failed to get stack trace',
+    };
   }
 
   async call(context: {
+    env: any;
     parameters: { threadId?: number; startFrame?: number; levels?: number };
     pushResult: (text: string) => void;
     pushError: (text: string) => void;
@@ -251,33 +270,43 @@ Usage:
 export class GetScopesTool {
   static id = 'get_scopes';
   groups = ['read'];
-  parameters = [
-    { name: 'frameId', required: false, type: 'number', description: 'Stack frame ID (defaults to top frame)', usage: '1' },
-  ];
+  permission = 'read';
 
   getId() { return GetScopesTool.id; }
 
-  getDescription(_options?: any): string {
-    return `## get_scopes
-Description: Retrieve the variable scopes for a given stack frame. Returns scope names and their variablesReference IDs which can be passed to get_variables.
-
-Parameters:
-- frameId: (optional) number. Stack frame ID. Defaults to the top frame.
-
-Usage:
-<get_scopes>
-</get_scopes>`;
+  getDescription(_env?: any): string {
+    return 'Retrieve the variable scopes for a given stack frame. Returns scope names and their variablesReference IDs which can be passed to get_variables.';
   }
 
   getCostEffectiveDescription(): string {
     return 'Retrieve variable scopes for a stack frame in the active debug session';
   }
 
-  toolUseDescription(): string {
-    return 'Getting scopes...';
+  // Shared param definition
+  private static readonly PARAMS = [
+    { name: 'frameId', required: false, type: 'number', detail: 'Stack frame ID (defaults to top frame)', description: 'Stack frame ID (defaults to top frame)', usage: '1' },
+  ];
+
+  // Property — read by toolToOpenAi(e).parameters
+  parameters = GetScopesTool.PARAMS;
+
+  // Method — read by the newer getParameters(env) paths
+  getParameters(_env?: any): any[] {
+    return GetScopesTool.PARAMS;
+  }
+
+  getLabels(args: Record<string, any>) {
+    const suffix = args?.frameId !== undefined ? ` (frame ${args.frameId})` : '';
+    return {
+      displayName: `Get Scopes${suffix}`,
+      running: `Getting scopes${suffix}...`,
+      success: `Got scopes${suffix}`,
+      error: 'Failed to get scopes',
+    };
   }
 
   async call(context: {
+    env: any;
     parameters: { frameId?: number };
     pushResult: (text: string) => void;
     pushError: (text: string) => void;
@@ -310,40 +339,44 @@ Usage:
 export class SetVariableTool {
   static id = 'set_variable';
   groups = ['edit'];
-  parameters = [
-    { name: 'variablesReference', required: true, type: 'number', description: 'The variables reference containing the variable', usage: '1' },
-    { name: 'name',               required: true, type: 'string', description: 'The name of the variable to set', usage: 'myVar' },
-    { name: 'value',              required: true, type: 'string', description: 'The new value for the variable (as string)', usage: '42' },
-  ];
+  permission = 'edit';
 
   getId() { return SetVariableTool.id; }
 
-  getDescription(_options?: any): string {
-    return `## set_variable
-Description: Set the value of a variable in the active debug session. Requires the debugger to be paused.
-
-Parameters:
-- variablesReference: (required) number. The variables reference containing the variable.
-- name: (required) string. The name of the variable to modify.
-- value: (required) string. The new value to assign.
-
-Usage:
-<set_variable>
-<variablesReference>1</variablesReference>
-<name>myVar</name>
-<value>42</value>
-</set_variable>`;
+  getDescription(_env?: any): string {
+    return 'Set the value of a variable in the active debug session. Requires the debugger to be paused.';
   }
 
   getCostEffectiveDescription(): string {
     return 'Set the value of a variable in the active debug session';
   }
 
-  toolUseDescription(params: any): string {
-    return `Setting ${params?.name} = ${params?.value}`;
+  // Shared param definition
+  private static readonly PARAMS = [
+    { name: 'variablesReference', required: true, type: 'number', detail: 'The variables reference containing the variable', description: 'The variables reference containing the variable', usage: '1' },
+    { name: 'name',               required: true, type: 'string', detail: 'The name of the variable to set', description: 'The name of the variable to set', usage: 'myVar' },
+    { name: 'value',              required: true, type: 'string', detail: 'The new value for the variable (as string)', description: 'The new value for the variable (as string)', usage: '42' },
+  ];
+
+  // Property — read by toolToOpenAi(e).parameters
+  parameters = SetVariableTool.PARAMS;
+
+  // Method — read by the newer getParameters(env) paths
+  getParameters(_env?: any): any[] {
+    return SetVariableTool.PARAMS;
+  }
+
+  getLabels(args: Record<string, any>) {
+    return {
+      displayName: 'Set Variable',
+      running: `Setting ${args?.name ?? '...'} = ${args?.value ?? '...'}`,
+      success: 'Variable set',
+      error: 'Failed to set variable',
+    };
   }
 
   async call(context: {
+    env: any;
     parameters: { variablesReference: number; name: string; value: string };
     pushResult: (text: string) => void;
     pushError: (text: string) => void;
@@ -375,36 +408,43 @@ Usage:
 export class GetDebugOutputTool {
   static id = 'get_debug_output';
   groups = ['read'];
-  parameters = [
-    { name: 'lines',    required: false, type: 'number', description: 'Number of recent lines to return (default: 100)', usage: '100' },
-    { name: 'category', required: false, type: 'string', description: 'Filter by category: console, stdout, or stderr', usage: 'stdout' },
-  ];
+  permission = 'read';
 
   getId() { return GetDebugOutputTool.id; }
 
-  getDescription(_options?: any): string {
-    return `## get_debug_output
-Description: Retrieve captured output from the debug console. Output is captured automatically during debug sessions via the Debug Adapter Protocol.
-
-Parameters:
-- lines: (optional) number. Number of recent lines to return. Default: 100.
-- category: (optional) string. Filter by output category — console, stdout, or stderr.
-
-Usage:
-<get_debug_output>
-<lines>100</lines>
-</get_debug_output>`;
+  getDescription(_env?: any): string {
+    return 'Retrieve captured output from the debug console. Output is captured automatically during debug sessions via the Debug Adapter Protocol.';
   }
 
   getCostEffectiveDescription(): string {
     return 'Retrieve captured output from the debug console';
   }
 
-  toolUseDescription(params: any): string {
-    return `Reading debug output${params?.category ? ` (${params.category})` : ''}...`;
+  // Shared param definition
+  private static readonly PARAMS = [
+    { name: 'lines',    required: false, type: 'number', detail: 'Number of recent lines to return (default: 100)', description: 'Number of recent lines to return (default: 100)', usage: '100' },
+    { name: 'category', required: false, type: 'string', detail: 'Filter by category: console, stdout, or stderr', description: 'Filter by category: console, stdout, or stderr', usage: 'stdout' },
+  ];
+
+  // Property — read by toolToOpenAi(e).parameters
+  parameters = GetDebugOutputTool.PARAMS;
+
+  // Method — read by the newer getParameters(env) paths
+  getParameters(_env?: any): any[] {
+    return GetDebugOutputTool.PARAMS;
+  }
+
+  getLabels(args: Record<string, any>) {
+    return {
+      displayName: 'Get Debug Output',
+      running: `Reading debug output${args?.category ? ` (${args.category})` : ''}...`,
+      success: 'Got debug output',
+      error: 'Failed to get debug output',
+    };
   }
 
   async call(context: {
+    env: any;
     parameters: { lines?: number; category?: string };
     pushResult: (text: string) => void;
     pushError: (text: string) => void;

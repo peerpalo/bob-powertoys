@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { isBobSetBreakpoint } from './tools/breakpoints.js';
+import { getBreakpointOwner } from './tools/breakpoints.js';
 
 /**
  * Shared debug adapter state and tracking
@@ -33,39 +33,51 @@ export function getRecentDebugOutput(lineCount: number = 20): string {
 }
 
 /**
- * Safely inject a message into the chat, avoiding collisions with Bob's
- * interactive ask/response flow.
+ * Safely inject a message into the specific Bob task that owns the breakpoint.
  */
-async function safeNotify(task: any, message: string): Promise<boolean> {
+async function safeNotify(chatManager: any, ownerTaskId: string, message: string): Promise<boolean> {
   try {
-    const lastMsg = task.clineMessages?.at(-1);
+    const task = chatManager.currentTasks?.find((t: any) => t.getId() === ownerTaskId);
+    if (!task) return false;
 
-    // Check if Bob is idle (finished) or actively running
-    const isIdle = !task.isStreaming && !task.isWaitingForFirstChunk;
+    const currentModeId = task.currentMode?.id;
+    if (!currentModeId) return false;
 
-    // If Bob is mid-stream, queue and bail
-    if (lastMsg?.partial === true || !isIdle) {
-      pendingNotifications.push(message);
-      return false;
-    }
-
-    // Bob finished its turn — submit a new message to make it respond
-    // This triggers a fresh turn, like the user typed it
-    await task.submitUserMessage(
-      `${message}`,
-      []
+    await chatManager.handleInputMessage(
+      {
+        type: 'userMessage',
+        content: `${message}`,
+        mode: currentModeId,
+      },
+      task  // targets the owning task, not the active one
     );
 
     return true;
   } catch (error) {
-    console.error('[Bob - PowerToys] Notify failed:', error);
+    console.error('[Bob - PowerToys] safeNotify failed:', error);
     return false;
   }
 }
 
 /**
- * Notifies the active Bob chat when a breakpoint is hit.
- * This automatically injects breakpoint information into Bob's conversation.
+ * Resolve the chat manager for a task, checking both active and
+ * backgrounded (open-but-not-focused) states.
+ */
+function findTaskChatManager(taskManager: any, taskId: string): any | null {
+  // State 1: active task (present in some manager's currentTasks)
+  let chatManager = taskManager.getChatManagerByTaskId?.(taskId);
+  if (chatManager) return chatManager;
+
+  // State 2: open but backgrounded (manager exists, matched by root task id)
+  chatManager = taskManager.getOpenChatManagerByRootTaskId?.(taskId);
+  if (chatManager) return chatManager;
+
+  return null;
+}
+
+/**
+ * Notifies the Bob task that owns the breakpoint when it is hit.
+ * Routes to the specific task via taskManager, supporting multiple concurrent tasks.
  */
 async function notifyBobOfBreakpointHit(
   info: { file: string; line: number; stackTrace: any; variables: any; output: string }
@@ -74,42 +86,54 @@ async function notifyBobOfBreakpointHit(
     // Check configuration setting
     const config = vscode.workspace.getConfiguration();
     const notificationMode = config.get<string>('breakpointNotifications', 'bobOnly');
-
-    // If disabled, skip notification
     if (notificationMode === 'disabled') {
       return false;
     }
 
-    // If bobOnly mode, check if this breakpoint was set by Bob
-    if (notificationMode === 'bobOnly') {
-      if (!isBobSetBreakpoint(info.file, info.line)) {
-        return false;
-      }
+    const ownerTaskId = getBreakpointOwner(info.file, info.line);
+
+    // bobOnly mode: only notify if Bob set this breakpoint
+    if (notificationMode === 'bobOnly' && !ownerTaskId) {
+      return false;
     }
 
-    // If we reach here, either mode is "all" or mode is "bobOnly" and breakpoint was set by Bob
     if (!bobExportsRef) {
       console.log('[Bob - PowerToys] No Bob exports available');
       return false;
     }
 
-    const provider = bobExportsRef?.sidebarProvider;
-    if (!provider?.getCurrentTask) {
-      console.log('[Bob - PowerToys] No provider access');
+    const taskManager = bobExportsRef?.taskManager;
+    if (!taskManager) {
+      console.log('[Bob - PowerToys] No taskManager access');
       return false;
     }
 
-    const task = provider.getCurrentTask();
+    if (!ownerTaskId) {
+      console.log('[Bob - PowerToys] No task owns this breakpoint — was it set outside Bob?');
+      return false;
+    }
+
+    // Escalating lookup: active first, then backgrounded
+    const chatManager = findTaskChatManager(taskManager, ownerTaskId);
+    if (!chatManager) {
+      console.log(`[Bob - PowerToys] Task ${ownerTaskId} not reachable (active or backgrounded)`);
+      return false;
+    }
+
+    // Confirm the owning task is actually present on this manager.
+    // currentTasks covers the active case; currentTask covers the
+    // backgrounded single-task case.
+    const task =
+      chatManager.currentTasks?.find((t: any) => t.getId() === ownerTaskId) ??
+      (chatManager.currentTask?.getId?.() === ownerTaskId ? chatManager.currentTask : undefined);
+
     if (!task) {
-      console.log('[Bob - PowerToys] No active task - Bob is not in a conversation');
+      console.log('[Bob - PowerToys] Owning task no longer present on its manager');
       return false;
     }
 
-    const message = [
-      `Breakpoint hit at ${info.file}:${info.line}`
-    ].join('\n');
-
-    return await safeNotify(task, message);
+    const message = `Breakpoint hit at ${info.file}:${info.line}`;
+    return await safeNotify(chatManager, ownerTaskId, message);
   } catch (error) {
     console.error('[Bob - PowerToys] Error notifying Bob:', error);
     return false;
@@ -123,18 +147,22 @@ async function notifyBobOfBreakpointHit(
 export async function flushPendingNotifications(bobExports: any): Promise<void> {
   if (pendingNotifications.length === 0) return;
 
-  const provider = bobExports?.sidebarProvider;
-  const task = provider?.getCurrentTask?.();
-  if (!task) return;
+  const taskManager = bobExports?.taskManager;
+  if (!taskManager?.getChatManagerByTaskId) return;
 
-  const lastMsg = task.clineMessages?.at(-1);
-  if (lastMsg?.partial === true) return; // still streaming, wait
-
-  // Drain the queue
+  // Drain the queue, grouped by taskId
   const queued = pendingNotifications.splice(0, pendingNotifications.length);
-  const combined = queued.join('\n\n---\n\n');
 
-  await safeNotify(task, combined);
+  // Attempt to deliver each to the task it belongs to (best-effort)
+  for (const message of queued) {
+    // Extract taskId from the message prefix if present, otherwise skip
+    const match = message.match(/^\[task:(.+?)\] /);
+    if (!match) continue;
+    const ownerTaskId = match[1];
+    const chatManager = taskManager.getChatManagerByTaskId(ownerTaskId);
+    if (!chatManager) continue;
+    await safeNotify(chatManager, ownerTaskId, message.replace(/^\[task:.+?\] /, ''));
+  }
 }
 
 /**
