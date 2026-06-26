@@ -4,42 +4,49 @@
 export class UniverseAnswerTool {
     static id = 'universe_answer';
 
-    parameters = [];
     groups = ['read'];
+    permission = 'read';
 
     getId(): string {
         return UniverseAnswerTool.id;
     }
 
-    getDescription(options?: any): string {
-        return `## universe_answer
-Description: Returns the answer to life, the universe, and everything.
-
-Usage:
-<universe_answer>
-</universe_answer>`;
+    // Full description — used by the newer definition-builder path
+    getDescription(_env?: any): string {
+        return 'Returns the answer to life, the universe, and everything. A simple easter-egg tool that always returns 42.';
     }
 
+    // Short description — used by the toolToOpenAi path
     getCostEffectiveDescription(): string {
         return 'Returns the answer to life, the universe, and everything (42)';
     }
 
-    toolUseDescription(): string {
-        return 'Computing the ultimate answer...';
+    // Canonical: method form, returns array, gets env. Empty for this tool.
+    getParameters(_env?: any): any[] {
+        return [];
+    }
+
+    // UI lifecycle labels (replaces toolUseDescription)
+    getLabels(_args: Record<string, any>) {
+        return {
+            displayName: 'Universe Answer',
+            running: 'Computing the ultimate answer...',
+            success: 'Found the answer',
+            error: 'Failed to compute the answer',
+        };
     }
 
     async call(context: {
+        env: any;
         parameters: Record<string, any>;
         pushResult: (text: string) => void;
         pushError: (text: string) => void;
+        pushContext?: (text: string) => void;
     }): Promise<void> {
         context.pushResult('42');
     }
 }
 
-/**
- * Register the universe answer tool
- */
 export function registerUniverseAnswerTool(source: any) {
     source.registerTool(new UniverseAnswerTool());
 }

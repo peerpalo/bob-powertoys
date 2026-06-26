@@ -5,28 +5,6 @@
 import * as vscode from 'vscode';
 
 /**
- * Parse a parameter that might be a JSON string or already parsed object/array.
- * Bob's native API sends complex parameters as JSON strings.
- *
- * @param param The parameter value (string or already parsed)
- * @param paramName Name of the parameter for error messages
- * @returns The parsed value
- * @throws Error if parsing fails
- */
-export function parseJsonParameter<T>(param: string | T, paramName: string): T {
-  if (typeof param === 'string') {
-    try {
-      return JSON.parse(param) as T;
-    } catch (error) {
-      throw new Error(
-        `Failed to parse ${paramName} parameter: ${error instanceof Error ? error.message : String(error)}`
-      );
-    }
-  }
-  return param;
-}
-
-/**
  * Resolve a frame ID for debug operations.
  * If the provided frameId is undefined, null, or <= 0, resolves to the top frame.
  *

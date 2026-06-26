@@ -1,40 +1,30 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
-import { parseJsonParameter } from './utils.js';
 
 // ─── Bob-set Breakpoint Tracking ─────────────────────────────────────────────
 
 /**
- * Set of breakpoints that were set by Bob (via set_breakpoints tool)
- * Format: "file:line" (normalized file path)
+ * Maps "normalizedFile:line" to taskId of the Bob task that set the breakpoint.
  */
-const bobSetBreakpoints = new Set<string>();
+const breakpointOwners = new Map<string, string>();
 
-/**
- * Check if a breakpoint was set by Bob
- */
-export function isBobSetBreakpoint(file: string, line: number): boolean {
-  const normalizedFile = path.normalize(file);
-  const key = `${normalizedFile}:${line}`;
-  return bobSetBreakpoints.has(key);
+function breakpointKey(file: string, line: number): string {
+  return `${path.normalize(file)}:${line}`;
 }
 
 /**
- * Mark a breakpoint as set by Bob
+ * Returns the taskId that owns this breakpoint, or undefined if it was not set by Bob.
  */
-function markAsBobSet(file: string, line: number): void {
-  const normalizedFile = path.normalize(file);
-  const key = `${normalizedFile}:${line}`;
-  bobSetBreakpoints.add(key);
+export function getBreakpointOwner(file: string, line: number): string | undefined {
+  return breakpointOwners.get(breakpointKey(file, line));
 }
 
-/**
- * Unmark a breakpoint as set by Bob
- */
-function unmarkAsBobSet(file: string, line: number): void {
-  const normalizedFile = path.normalize(file);
-  const key = `${normalizedFile}:${line}`;
-  bobSetBreakpoints.delete(key);
+function recordBreakpointOwner(file: string, line: number, taskId: string): void {
+  breakpointOwners.set(breakpointKey(file, line), taskId);
+}
+
+function clearBreakpointOwner(file: string, line: number): void {
+  breakpointOwners.delete(breakpointKey(file, line));
 }
 
 // ─── Tool classes ────────────────────────────────────────────────────────────
@@ -42,62 +32,52 @@ function unmarkAsBobSet(file: string, line: number): void {
 export class SetBreakpointsTool {
   static id = 'set_breakpoints';
   groups = ['edit'];
-  parameters = [
-    {
-      name: 'breakpoints',
-      required: true,
-      type: 'array',
-      description: 'Array of breakpoint objects with file, line, and optional condition',
-      usage: '[{"file": "src/app.ts", "line": 42, "condition": "x > 10"}]'
-    }
-  ];
+  permission = 'edit';
 
   getId() { return SetBreakpointsTool.id; }
 
-  getDescription(_options?: any): string {
-    return `## set_breakpoints
-Description: Set one or more breakpoints in source files. Supports conditional breakpoints. Automatically resolves relative paths against workspace folders.
-
-Parameters:
-- breakpoints: (required) array. List of breakpoint objects, each containing:
-  - file: (required) string. File path (absolute or relative to workspace)
-  - line: (required) number. Line number (1-based)
-  - condition: (optional) string. Conditional expression for the breakpoint
-
-Usage:
-<set_breakpoints>
-<breakpoints>[{"file": "src/app.ts", "line": 42}, {"file": "src/utils.ts", "line": 15, "condition": "count > 100"}]</breakpoints>
-</set_breakpoints>`;
+  getDescription(_env?: any): string {
+    return 'Set one or more breakpoints in source files. Supports conditional breakpoints. Automatically resolves relative paths against workspace folders.';
   }
 
   getCostEffectiveDescription(): string {
     return 'Set one or more breakpoints in source files with optional conditions';
   }
 
-  toolUseDescription(params: any): string {
-    let breakpoints: any;
-    try {
-      breakpoints = parseJsonParameter(params?.breakpoints, 'breakpoints');
-    } catch {
-      breakpoints = params?.breakpoints;
-    }
-    const count = Array.isArray(breakpoints) ? breakpoints.length : 0;
-    return `Setting ${count} breakpoint${count !== 1 ? 's' : ''}...`;
+  // Shared param definition
+  private static readonly PARAMS = [
+    { name: 'breakpoints', required: true, type: 'array', detail: 'Array of breakpoint objects with file, line, and optional condition', description: 'Array of breakpoint objects with file, line, and optional condition', usage: '[{"file": "src/app.ts", "line": 42, "condition": "x > 10"}]' },
+  ];
+
+  // Property — read by toolToOpenAi(e).parameters
+  parameters = SetBreakpointsTool.PARAMS;
+
+  // Method — read by the newer getParameters(env) paths
+  getParameters(_env?: any): any[] {
+    return SetBreakpointsTool.PARAMS;
+  }
+
+  getLabels(args: Record<string, any>) {
+    const bps = args?.breakpoints ?? [];
+    const count = bps.length;
+    const where = count === 1 ? `${bps[0].file}:${bps[0].line}` : `${count} breakpoints`;
+    return {
+      displayName: `Set ${where}`,
+      running: `Setting ${where}...`,
+      success: `Set ${where}`,
+      error: `Failed to set ${where}`,
+    };
   }
 
   async call(context: {
+    env: any;
     parameters: { breakpoints: Array<{ file: string; line: number; condition?: string }> };
+    setMetadata: (m: any) => void; 
     pushResult: (text: string) => void;
     pushError: (text: string) => void;
   }): Promise<void> {
-    // Parse breakpoints (Bob sends arrays as JSON strings)
-    let breakpoints: Array<{ file: string; line: number; condition?: string }>;
-    try {
-      breakpoints = parseJsonParameter(context.parameters.breakpoints, 'breakpoints');
-    } catch (error) {
-      context.pushError(error instanceof Error ? error.message : String(error));
-      return;
-    }
+    const taskId: string | undefined = context.env?.id;
+    const breakpoints = context.parameters.breakpoints;
 
     if (!Array.isArray(breakpoints) || breakpoints.length === 0) {
       context.pushError('breakpoints parameter must be a non-empty array');
@@ -142,9 +122,9 @@ Usage:
           v.location.range.start.line === bp.line - 1
       );
       
-      // Mark as Bob-set if successfully added
-      if (verified) {
-        markAsBobSet(added.location.uri.fsPath, bp.line);
+      // Record ownership so the adapter can route the breakpoint-hit back to this task
+      if (verified && taskId) {
+        recordBreakpointOwner(added.location.uri.fsPath, bp.line, taskId);
       }
       
       results.push({
@@ -167,61 +147,50 @@ Usage:
 export class RemoveBreakpointsTool {
   static id = 'remove_breakpoints';
   groups = ['edit'];
-  parameters = [
-    {
-      name: 'breakpoints',
-      required: true,
-      type: 'array',
-      description: 'Array of breakpoint objects with file and line to remove',
-      usage: '[{"file": "src/app.ts", "line": 42}]'
-    }
-  ];
+  permission = 'edit';
 
   getId() { return RemoveBreakpointsTool.id; }
 
-  getDescription(_options?: any): string {
-    return `## remove_breakpoints
-Description: Remove one or more breakpoints from source files by file path and line number.
-
-Parameters:
-- breakpoints: (required) array. List of breakpoint objects to remove, each containing:
-  - file: (required) string. File path
-  - line: (required) number. Line number (1-based)
-
-Usage:
-<remove_breakpoints>
-<breakpoints>[{"file": "src/app.ts", "line": 42}, {"file": "src/utils.ts", "line": 15}]</breakpoints>
-</remove_breakpoints>`;
+  getDescription(_env?: any): string {
+    return 'Remove one or more breakpoints from source files by file path and line number.';
   }
 
   getCostEffectiveDescription(): string {
     return 'Remove one or more breakpoints from source files';
   }
 
-  toolUseDescription(params: any): string {
-    let breakpoints: any;
-    try {
-      breakpoints = parseJsonParameter(params?.breakpoints, 'breakpoints');
-    } catch {
-      breakpoints = params?.breakpoints;
-    }
-    const count = Array.isArray(breakpoints) ? breakpoints.length : 0;
-    return `Removing ${count} breakpoint${count !== 1 ? 's' : ''}...`;
+  // Shared param definition
+  private static readonly PARAMS = [
+    { name: 'breakpoints', required: true, type: 'array', detail: 'Array of breakpoint objects with file and line to remove', description: 'Array of breakpoint objects with file and line to remove', usage: '[{"file": "src/app.ts", "line": 42}]' },
+  ];
+
+  // Property — read by toolToOpenAi(e).parameters
+  parameters = RemoveBreakpointsTool.PARAMS;
+
+  // Method — read by the newer getParameters(env) paths
+  getParameters(_env?: any): any[] {
+    return RemoveBreakpointsTool.PARAMS;
+  }
+
+  getLabels(args: Record<string, any>) {
+    const bps = args?.breakpoints ?? [];
+    const count = bps.length;
+    const where = count === 1 ? `${bps[0].file}:${bps[0].line}` : `${count} breakpoints`;
+    return {
+      displayName: `Remove ${where}`,
+      running: `Removing ${where}...`,
+      success: `Removed ${where}`,
+      error: `Failed to remove ${where}`,
+    };
   }
 
   async call(context: {
+    env: any;
     parameters: { breakpoints: Array<{ file: string; line: number }> };
     pushResult: (text: string) => void;
     pushError: (text: string) => void;
   }): Promise<void> {
-    // Parse breakpoints (Bob sends arrays as JSON strings)
-    let breakpoints: Array<{ file: string; line: number }>;
-    try {
-      breakpoints = parseJsonParameter(context.parameters.breakpoints, 'breakpoints');
-    } catch (error) {
-      context.pushError(error instanceof Error ? error.message : String(error));
-      return;
-    }
+    const breakpoints = context.parameters.breakpoints;
 
     if (!Array.isArray(breakpoints) || breakpoints.length === 0) {
       context.pushError('breakpoints parameter must be a non-empty array');
@@ -241,8 +210,8 @@ Usage:
 
       if (matching.length > 0) {
         toRemove.push(...matching);
-        // Unmark as Bob-set when removed
-        unmarkAsBobSet(uri.fsPath, bp.line);
+        // Clear ownership tracking when removed
+        clearBreakpointOwner(uri.fsPath, bp.line);
         results.push({ file: bp.file, line: bp.line, removed: true });
       } else {
         results.push({ file: bp.file, line: bp.line, removed: false, reason: 'Not found' });
@@ -261,30 +230,40 @@ Usage:
 export class ListBreakpointsTool {
   static id = 'list_breakpoints';
   groups = ['read'];
-  parameters = [];
+  permission = 'read';
 
   getId() { return ListBreakpointsTool.id; }
 
-  getDescription(_options?: any): string {
-    return `## list_breakpoints
-Description: List all currently set breakpoints in the workspace, including their file locations, line numbers, conditions, and enabled status.
-
-Parameters: None
-
-Usage:
-<list_breakpoints>
-</list_breakpoints>`;
+  getDescription(_env?: any): string {
+    return 'List all currently set breakpoints in the workspace, including their file locations, line numbers, conditions, and enabled status.';
   }
 
   getCostEffectiveDescription(): string {
     return 'List all currently set breakpoints in the workspace';
   }
 
-  toolUseDescription(): string {
-    return 'Listing breakpoints...';
+  // Shared param definition
+  private static readonly PARAMS: any[] = [];
+
+  // Property — read by toolToOpenAi(e).parameters
+  parameters = ListBreakpointsTool.PARAMS;
+
+  // Method — read by the newer getParameters(env) paths
+  getParameters(_env?: any): any[] {
+    return ListBreakpointsTool.PARAMS;
+  }
+
+  getLabels(_args: Record<string, any>) {
+    return {
+      displayName: 'List Breakpoints',
+      running: 'Listing breakpoints...',
+      success: 'Listed breakpoints',
+      error: 'Failed to list breakpoints',
+    };
   }
 
   async call(context: {
+    env: any;
     parameters: Record<string, any>;
     pushResult: (text: string) => void;
     pushError: (text: string) => void;

@@ -5,30 +5,40 @@ import * as vscode from 'vscode';
 export class StepOverTool {
   static id = 'step_over';
   groups = ['edit'];
-  parameters = [];
+  permission = 'edit';
 
   getId() { return StepOverTool.id; }
 
-  getDescription(_options?: any): string {
-    return `## step_over
-Description: Step over the current line in the active debug session. Executes the current line and moves to the next line, stepping over function calls.
-
-Parameters: None
-
-Usage:
-<step_over>
-</step_over>`;
+  getDescription(_env?: any): string {
+    return 'Step over the current line in the active debug session. Executes the current line and moves to the next line, stepping over function calls.';
   }
 
   getCostEffectiveDescription(): string {
     return 'Step over the current line in the active debug session';
   }
 
-  toolUseDescription(): string {
-    return 'Stepping over...';
+  // Shared param definition
+  private static readonly PARAMS: any[] = [];
+
+  // Property — read by toolToOpenAi(e).parameters
+  parameters = StepOverTool.PARAMS;
+
+  // Method — read by the newer getParameters(env) paths
+  getParameters(_env?: any): any[] {
+    return StepOverTool.PARAMS;
+  }
+
+  getLabels(_args: Record<string, any>) {
+    return {
+      displayName: 'Step Over',
+      running: 'Stepping over...',
+      success: 'Stepped over',
+      error: 'Failed to step over',
+    };
   }
 
   async call(context: {
+    env: any;
     parameters: Record<string, any>;
     pushResult: (text: string) => void;
     pushError: (text: string) => void;
@@ -51,30 +61,40 @@ Usage:
 export class StepIntoTool {
   static id = 'step_into';
   groups = ['edit'];
-  parameters = [];
+  permission = 'edit';
 
   getId() { return StepIntoTool.id; }
 
-  getDescription(_options?: any): string {
-    return `## step_into
-Description: Step into the function call at the current line in the active debug session. Enters the function to debug its internals.
-
-Parameters: None
-
-Usage:
-<step_into>
-</step_into>`;
+  getDescription(_env?: any): string {
+    return 'Step into the function call at the current line in the active debug session. Enters the function to debug its internals.';
   }
 
   getCostEffectiveDescription(): string {
     return 'Step into the function call at the current line';
   }
 
-  toolUseDescription(): string {
-    return 'Stepping into...';
+  // Shared param definition
+  private static readonly PARAMS: any[] = [];
+
+  // Property — read by toolToOpenAi(e).parameters
+  parameters = StepIntoTool.PARAMS;
+
+  // Method — read by the newer getParameters(env) paths
+  getParameters(_env?: any): any[] {
+    return StepIntoTool.PARAMS;
+  }
+
+  getLabels(_args: Record<string, any>) {
+    return {
+      displayName: 'Step Into',
+      running: 'Stepping into...',
+      success: 'Stepped into',
+      error: 'Failed to step into',
+    };
   }
 
   async call(context: {
+    env: any;
     parameters: Record<string, any>;
     pushResult: (text: string) => void;
     pushError: (text: string) => void;
@@ -97,30 +117,40 @@ Usage:
 export class StepOutTool {
   static id = 'step_out';
   groups = ['edit'];
-  parameters = [];
+  permission = 'edit';
 
   getId() { return StepOutTool.id; }
 
-  getDescription(_options?: any): string {
-    return `## step_out
-Description: Step out of the current function in the active debug session. Continues execution until the current function returns.
-
-Parameters: None
-
-Usage:
-<step_out>
-</step_out>`;
+  getDescription(_env?: any): string {
+    return 'Step out of the current function in the active debug session. Continues execution until the current function returns.';
   }
 
   getCostEffectiveDescription(): string {
     return 'Step out of the current function';
   }
 
-  toolUseDescription(): string {
-    return 'Stepping out...';
+  // Shared param definition
+  private static readonly PARAMS: any[] = [];
+
+  // Property — read by toolToOpenAi(e).parameters
+  parameters = StepOutTool.PARAMS;
+
+  // Method — read by the newer getParameters(env) paths
+  getParameters(_env?: any): any[] {
+    return StepOutTool.PARAMS;
+  }
+
+  getLabels(_args: Record<string, any>) {
+    return {
+      displayName: 'Step Out',
+      running: 'Stepping out...',
+      success: 'Stepped out',
+      error: 'Failed to step out',
+    };
   }
 
   async call(context: {
+    env: any;
     parameters: Record<string, any>;
     pushResult: (text: string) => void;
     pushError: (text: string) => void;
@@ -143,30 +173,40 @@ Usage:
 export class ContinueTool {
   static id = 'continue';
   groups = ['edit'];
-  parameters = [];
+  permission = 'edit';
 
   getId() { return ContinueTool.id; }
 
-  getDescription(_options?: any): string {
-    return `## continue
-Description: Continue execution in the active debug session. Resumes program execution until the next breakpoint or program termination.
-
-Parameters: None
-
-Usage:
-<continue>
-</continue>`;
+  getDescription(_env?: any): string {
+    return 'Continue execution in the active debug session. Resumes program execution until the next breakpoint or program termination.';
   }
 
   getCostEffectiveDescription(): string {
     return 'Continue execution until the next breakpoint';
   }
 
-  toolUseDescription(): string {
-    return 'Continuing execution...';
+  // Shared param definition
+  private static readonly PARAMS: any[] = [];
+
+  // Property — read by toolToOpenAi(e).parameters
+  parameters = ContinueTool.PARAMS;
+
+  // Method — read by the newer getParameters(env) paths
+  getParameters(_env?: any): any[] {
+    return ContinueTool.PARAMS;
+  }
+
+  getLabels(_args: Record<string, any>) {
+    return {
+      displayName: 'Continue',
+      running: 'Continuing execution...',
+      success: 'Execution continued',
+      error: 'Failed to continue execution',
+    };
   }
 
   async call(context: {
+    env: any;
     parameters: Record<string, any>;
     pushResult: (text: string) => void;
     pushError: (text: string) => void;
@@ -189,30 +229,40 @@ Usage:
 export class PauseTool {
   static id = 'pause';
   groups = ['edit'];
-  parameters = [];
+  permission = 'edit';
 
   getId() { return PauseTool.id; }
 
-  getDescription(_options?: any): string {
-    return `## pause
-Description: Pause execution in the active debug session. Interrupts the running program to inspect its current state.
-
-Parameters: None
-
-Usage:
-<pause>
-</pause>`;
+  getDescription(_env?: any): string {
+    return 'Pause execution in the active debug session. Interrupts the running program to inspect its current state.';
   }
 
   getCostEffectiveDescription(): string {
     return 'Pause execution in the active debug session';
   }
 
-  toolUseDescription(): string {
-    return 'Pausing execution...';
+  // Shared param definition
+  private static readonly PARAMS: any[] = [];
+
+  // Property — read by toolToOpenAi(e).parameters
+  parameters = PauseTool.PARAMS;
+
+  // Method — read by the newer getParameters(env) paths
+  getParameters(_env?: any): any[] {
+    return PauseTool.PARAMS;
+  }
+
+  getLabels(_args: Record<string, any>) {
+    return {
+      displayName: 'Pause',
+      running: 'Pausing execution...',
+      success: 'Execution paused',
+      error: 'Failed to pause execution',
+    };
   }
 
   async call(context: {
+    env: any;
     parameters: Record<string, any>;
     pushResult: (text: string) => void;
     pushError: (text: string) => void;

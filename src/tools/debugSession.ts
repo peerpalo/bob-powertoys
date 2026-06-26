@@ -5,30 +5,40 @@ import * as vscode from 'vscode';
 export class GetActiveDebugSessionTool {
   static id = 'get_active_debug_session';
   groups = ['read'];
-  parameters = [];
+  permission = 'read';
 
   getId() { return GetActiveDebugSessionTool.id; }
 
-  getDescription(_options?: any): string {
-    return `## get_active_debug_session
-Description: Get information about the currently active debug session, including its ID, name, type, and workspace folder.
-
-Parameters: None
-
-Usage:
-<get_active_debug_session>
-</get_active_debug_session>`;
+  getDescription(_env?: any): string {
+    return 'Get information about the currently active debug session, including its ID, name, type, and workspace folder.';
   }
 
   getCostEffectiveDescription(): string {
     return 'Get information about the currently active debug session';
   }
 
-  toolUseDescription(): string {
-    return 'Getting active debug session...';
+  // Shared param definition
+  private static readonly PARAMS: any[] = [];
+
+  // Property — read by toolToOpenAi(e).parameters
+  parameters = GetActiveDebugSessionTool.PARAMS;
+
+  // Method — read by the newer getParameters(env) paths
+  getParameters(_env?: any): any[] {
+    return GetActiveDebugSessionTool.PARAMS;
+  }
+
+  getLabels(_args: Record<string, any>) {
+    return {
+      displayName: 'Get Active Debug Session',
+      running: 'Getting active debug session...',
+      success: 'Got active debug session',
+      error: 'Failed to get active debug session',
+    };
   }
 
   async call(context: {
+    env: any;
     parameters: Record<string, any>;
     pushResult: (text: string) => void;
     pushError: (text: string) => void;
@@ -54,30 +64,40 @@ Usage:
 export class ListDebugConfigurationsTool {
   static id = 'list_debug_configurations';
   groups = ['read'];
-  parameters = [];
+  permission = 'read';
 
   getId() { return ListDebugConfigurationsTool.id; }
 
-  getDescription(_options?: any): string {
-    return `## list_debug_configurations
-Description: List all available debug configurations from launch.json files in all workspace folders. Shows configuration names, types, and settings.
-
-Parameters: None
-
-Usage:
-<list_debug_configurations>
-</list_debug_configurations>`;
+  getDescription(_env?: any): string {
+    return 'List all available debug configurations from launch.json files in all workspace folders. Shows configuration names, types, and settings.';
   }
 
   getCostEffectiveDescription(): string {
     return 'List all available debug configurations from workspace launch.json files';
   }
 
-  toolUseDescription(): string {
-    return 'Listing debug configurations...';
+  // Shared param definition
+  private static readonly PARAMS: any[] = [];
+
+  // Property — read by toolToOpenAi(e).parameters
+  parameters = ListDebugConfigurationsTool.PARAMS;
+
+  // Method — read by the newer getParameters(env) paths
+  getParameters(_env?: any): any[] {
+    return ListDebugConfigurationsTool.PARAMS;
+  }
+
+  getLabels(_args: Record<string, any>) {
+    return {
+      displayName: 'List Debug Configurations',
+      running: 'Listing debug configurations...',
+      success: 'Listed debug configurations',
+      error: 'Failed to list debug configurations',
+    };
   }
 
   async call(context: {
+    env: any;
     parameters: Record<string, any>;
     pushResult: (text: string) => void;
     pushError: (text: string) => void;
@@ -120,56 +140,45 @@ Usage:
 export class StartDebugSessionTool {
   static id = 'start_debug_session';
   groups = ['edit'];
-  parameters = [
-    {
-      name: 'configName',
-      required: false,
-      type: 'string',
-      description: 'Name of the debug configuration to start (from launch.json)',
-      usage: 'Launch Program'
-    },
-    {
-      name: 'context',
-      required: false,
-      type: 'string',
-      description: 'Context hint to help select the right configuration (e.g., "attach", "node", "python")',
-      usage: 'attach to running process'
-    }
-  ];
+  permission = 'edit';
 
   getId() { return StartDebugSessionTool.id; }
 
-  getDescription(_options?: any): string {
-    return `## start_debug_session
-Description: Start a debug session using a configuration from launch.json. Can specify a configuration by name or provide context to auto-select the best match.
-
-Parameters:
-- configName: (optional) string. Exact name of the debug configuration to use.
-- context: (optional) string. Context hint to help select configuration (e.g., "attach", "node", "python").
-
-Usage:
-<start_debug_session>
-<configName>Launch Program</configName>
-</start_debug_session>
-
-Or with context:
-<start_debug_session>
-<context>attach to running node process</context>
-</start_debug_session>`;
+  getDescription(_env?: any): string {
+    return 'Start a debug session using a configuration from launch.json. Can specify a configuration by name or provide context to auto-select the best match.';
   }
 
   getCostEffectiveDescription(): string {
     return 'Start a debug session using a configuration from launch.json';
   }
 
-  toolUseDescription(params: any): string {
-    if (params?.configName) {
-      return `Starting debug session: ${params.configName}`;
-    }
-    return 'Starting debug session...';
+  // Shared param definition
+  private static readonly PARAMS = [
+    { name: 'configName', required: false, type: 'string', detail: 'Name of the debug configuration to start (from launch.json)', description: 'Name of the debug configuration to start (from launch.json)', usage: 'Launch Program' },
+    { name: 'context',    required: false, type: 'string', detail: 'Context hint to help select the right configuration (e.g., "attach", "node", "python")', description: 'Context hint to help select the right configuration (e.g., "attach", "node", "python")', usage: 'attach to running process' },
+  ];
+
+  // Property — read by toolToOpenAi(e).parameters
+  parameters = StartDebugSessionTool.PARAMS;
+
+  // Method — read by the newer getParameters(env) paths
+  getParameters(_env?: any): any[] {
+    return StartDebugSessionTool.PARAMS;
+  }
+
+  getLabels(args: Record<string, any>) {
+    const name = args?.configName ?? args?.context;
+    const suffix = name ? `: ${name}` : '';
+    return {
+      displayName: `Start Debug Session${suffix}`,
+      running: `Starting debug session${suffix}...`,
+      success: `Debug session started${suffix}`,
+      error: `Failed to start debug session${suffix}`,
+    };
   }
 
   async call(context: {
+    env: any;
     parameters: { configName?: string; context?: string };
     pushResult: (text: string) => void;
     pushError: (text: string) => void;
@@ -285,30 +294,42 @@ Or with context:
 export class StopDebugSessionTool {
   static id = 'stop_debug_session';
   groups = ['edit'];
-  parameters = [];
+  permission = 'edit';
 
   getId() { return StopDebugSessionTool.id; }
 
-  getDescription(_options?: any): string {
-    return `## stop_debug_session
-Description: Stop the currently active debug session. Terminates the debugging process and cleans up resources.
-
-Parameters: None
-
-Usage:
-<stop_debug_session>
-</stop_debug_session>`;
+  getDescription(_env?: any): string {
+    return 'Stop the currently active debug session. Terminates the debugging process and cleans up resources.';
   }
 
   getCostEffectiveDescription(): string {
     return 'Stop the currently active debug session';
   }
 
-  toolUseDescription(): string {
-    return 'Stopping debug session...';
+  // Shared param definition
+  private static readonly PARAMS: any[] = [];
+
+  // Property — read by toolToOpenAi(e).parameters
+  parameters = StopDebugSessionTool.PARAMS;
+
+  // Method — read by the newer getParameters(env) paths
+  getParameters(_env?: any): any[] {
+    return StopDebugSessionTool.PARAMS;
+  }
+
+  getLabels(_args: Record<string, any>) {
+    const name = vscode.debug.activeDebugSession?.name;
+    const suffix = name ? `: ${name}` : '';
+    return {
+      displayName: `Stop Debug Session${suffix}`,
+      running: `Stopping debug session${suffix}...`,
+      success: `Debug session stopped${suffix}`,
+      error: `Failed to stop debug session${suffix}`,
+    };
   }
 
   async call(context: {
+    env: any;
     parameters: Record<string, any>;
     pushResult: (text: string) => void;
     pushError: (text: string) => void;
