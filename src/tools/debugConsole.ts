@@ -53,10 +53,10 @@ export class EvaluateExpressionTool {
     { name: 'expand',     required: false, type: 'string', detail: 'Expand object references: true or false (default: true)', description: 'Expand object references: true or false (default: true)', usage: 'true' },
   ];
 
-  // Property — read by toolToOpenAi(e).parameters
+  // Property - read by toolToOpenAi(e).parameters
   parameters = EvaluateExpressionTool.PARAMS;
 
-  // Method — read by the newer getParameters(env) paths
+  // Method - read by the newer getParameters(env) paths
   getParameters(_env?: any): any[] {
     return EvaluateExpressionTool.PARAMS;
   }
@@ -141,10 +141,10 @@ export class GetVariablesTool {
     { name: 'filter',             required: false, type: 'string', detail: 'Filter variables: indexed or named', description: 'Filter variables: indexed or named', usage: 'named' },
   ];
 
-  // Property — read by toolToOpenAi(e).parameters
+  // Property - read by toolToOpenAi(e).parameters
   parameters = GetVariablesTool.PARAMS;
 
-  // Method — read by the newer getParameters(env) paths
+  // Method - read by the newer getParameters(env) paths
   getParameters(_env?: any): any[] {
     return GetVariablesTool.PARAMS;
   }
@@ -204,10 +204,10 @@ export class GetStackTraceTool {
     { name: 'levels',     required: false, type: 'number', detail: 'Number of frames to retrieve (default: 20)', description: 'Number of frames to retrieve (default: 20)', usage: '20' },
   ];
 
-  // Property — read by toolToOpenAi(e).parameters
+  // Property - read by toolToOpenAi(e).parameters
   parameters = GetStackTraceTool.PARAMS;
 
-  // Method — read by the newer getParameters(env) paths
+  // Method - read by the newer getParameters(env) paths
   getParameters(_env?: any): any[] {
     return GetStackTraceTool.PARAMS;
   }
@@ -287,10 +287,10 @@ export class GetScopesTool {
     { name: 'frameId', required: false, type: 'number', detail: 'Stack frame ID (defaults to top frame)', description: 'Stack frame ID (defaults to top frame)', usage: '1' },
   ];
 
-  // Property — read by toolToOpenAi(e).parameters
+  // Property - read by toolToOpenAi(e).parameters
   parameters = GetScopesTool.PARAMS;
 
-  // Method — read by the newer getParameters(env) paths
+  // Method - read by the newer getParameters(env) paths
   getParameters(_env?: any): any[] {
     return GetScopesTool.PARAMS;
   }
@@ -358,10 +358,10 @@ export class SetVariableTool {
     { name: 'value',              required: true, type: 'string', detail: 'The new value for the variable (as string)', description: 'The new value for the variable (as string)', usage: '42' },
   ];
 
-  // Property — read by toolToOpenAi(e).parameters
+  // Property - read by toolToOpenAi(e).parameters
   parameters = SetVariableTool.PARAMS;
 
-  // Method — read by the newer getParameters(env) paths
+  // Method - read by the newer getParameters(env) paths
   getParameters(_env?: any): any[] {
     return SetVariableTool.PARAMS;
   }
@@ -426,10 +426,10 @@ export class GetDebugOutputTool {
     { name: 'category', required: false, type: 'string', detail: 'Filter by category: console, stdout, or stderr', description: 'Filter by category: console, stdout, or stderr', usage: 'stdout' },
   ];
 
-  // Property — read by toolToOpenAi(e).parameters
+  // Property - read by toolToOpenAi(e).parameters
   parameters = GetDebugOutputTool.PARAMS;
 
-  // Method — read by the newer getParameters(env) paths
+  // Method - read by the newer getParameters(env) paths
   getParameters(_env?: any): any[] {
     return GetDebugOutputTool.PARAMS;
   }

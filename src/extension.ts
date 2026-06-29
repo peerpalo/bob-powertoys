@@ -6,6 +6,8 @@ import { registerBreakpointTools } from './tools/breakpoints.js';
 import { registerDebugControlTools } from './tools/debugControl.js';
 import { registerUniverseAnswerTool } from './tools/universeAnswer.js';
 import { registerDebugAdapterTracker } from './debugAdapter.js';
+import { registerTaskManager } from './tools/utils.js';
+import { registerTaskCommands, registerTaskPersistence, restoreTasks } from './taskManager.js';
 
 const BOB_EXTENSION_ID = 'IBM.bob-code';
 
@@ -33,7 +35,9 @@ export function activate(context: vscode.ExtensionContext) {
     console.error('[Bob - PowerToys] Bob extension not found - tools will not be available');
     showStatusBarError();
   } else {
-    bobExtension.activate().then(() => registerAllTools(context));
+    bobExtension.activate().then(() => {
+      registerPowerToys(context, bobExtension.exports);
+    });
   }
 
   // Register status command
@@ -42,11 +46,21 @@ export function activate(context: vscode.ExtensionContext) {
       showStatus();
     })
   );
+
+  // Register task window commands
+  registerTaskCommands(context);
 }
 
-function registerAllTools(context: vscode.ExtensionContext) {
+async function registerPowerToys(context: vscode.ExtensionContext, bobExports: any) {
   try {
-    const bobExports = vscode.extensions.getExtension(BOB_EXTENSION_ID)!.exports;
+    console.log('[Bob - PowerToys] Registering taskManager...');
+    await registerTaskManager(bobExports);
+
+    // Persistence must be registered first so the openTask patch is in place
+    // before restoreTasks calls openTaskInNewTab - otherwise the onDispose hooks
+    // for restored tabs would never be registered.
+    registerTaskPersistence(context);
+    await restoreTasks(context);
 
     if (!bobExports?.registerSource) {
       console.error('[Bob - PowerToys] Bob registerSource API not found');

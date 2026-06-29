@@ -20,10 +20,10 @@ export class StepOverTool {
   // Shared param definition
   private static readonly PARAMS: any[] = [];
 
-  // Property — read by toolToOpenAi(e).parameters
+  // Property - read by toolToOpenAi(e).parameters
   parameters = StepOverTool.PARAMS;
 
-  // Method — read by the newer getParameters(env) paths
+  // Method - read by the newer getParameters(env) paths
   getParameters(_env?: any): any[] {
     return StepOverTool.PARAMS;
   }
@@ -76,10 +76,10 @@ export class StepIntoTool {
   // Shared param definition
   private static readonly PARAMS: any[] = [];
 
-  // Property — read by toolToOpenAi(e).parameters
+  // Property - read by toolToOpenAi(e).parameters
   parameters = StepIntoTool.PARAMS;
 
-  // Method — read by the newer getParameters(env) paths
+  // Method - read by the newer getParameters(env) paths
   getParameters(_env?: any): any[] {
     return StepIntoTool.PARAMS;
   }
@@ -132,10 +132,10 @@ export class StepOutTool {
   // Shared param definition
   private static readonly PARAMS: any[] = [];
 
-  // Property — read by toolToOpenAi(e).parameters
+  // Property - read by toolToOpenAi(e).parameters
   parameters = StepOutTool.PARAMS;
 
-  // Method — read by the newer getParameters(env) paths
+  // Method - read by the newer getParameters(env) paths
   getParameters(_env?: any): any[] {
     return StepOutTool.PARAMS;
   }
@@ -188,10 +188,10 @@ export class ContinueTool {
   // Shared param definition
   private static readonly PARAMS: any[] = [];
 
-  // Property — read by toolToOpenAi(e).parameters
+  // Property - read by toolToOpenAi(e).parameters
   parameters = ContinueTool.PARAMS;
 
-  // Method — read by the newer getParameters(env) paths
+  // Method - read by the newer getParameters(env) paths
   getParameters(_env?: any): any[] {
     return ContinueTool.PARAMS;
   }
@@ -244,10 +244,10 @@ export class PauseTool {
   // Shared param definition
   private static readonly PARAMS: any[] = [];
 
-  // Property — read by toolToOpenAi(e).parameters
+  // Property - read by toolToOpenAi(e).parameters
   parameters = PauseTool.PARAMS;
 
-  // Method — read by the newer getParameters(env) paths
+  // Method - read by the newer getParameters(env) paths
   getParameters(_env?: any): any[] {
     return PauseTool.PARAMS;
   }

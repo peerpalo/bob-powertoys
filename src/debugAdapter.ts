@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { getBreakpointOwner } from './tools/breakpoints.js';
+import { getTaskManager, findTaskChatManager } from './tools/utils.js';
 
 /**
  * Shared debug adapter state and tracking
@@ -59,21 +60,6 @@ async function safeNotify(chatManager: any, ownerTaskId: string, message: string
   }
 }
 
-/**
- * Resolve the chat manager for a task, checking both active and
- * backgrounded (open-but-not-focused) states.
- */
-function findTaskChatManager(taskManager: any, taskId: string): any | null {
-  // State 1: active task (present in some manager's currentTasks)
-  let chatManager = taskManager.getChatManagerByTaskId?.(taskId);
-  if (chatManager) return chatManager;
-
-  // State 2: open but backgrounded (manager exists, matched by root task id)
-  chatManager = taskManager.getOpenChatManagerByRootTaskId?.(taskId);
-  if (chatManager) return chatManager;
-
-  return null;
-}
 
 /**
  * Notifies the Bob task that owns the breakpoint when it is hit.
@@ -102,14 +88,14 @@ async function notifyBobOfBreakpointHit(
       return false;
     }
 
-    const taskManager = bobExportsRef?.taskManager;
+    const taskManager = getTaskManager();
     if (!taskManager) {
       console.log('[Bob - PowerToys] No taskManager access');
       return false;
     }
 
     if (!ownerTaskId) {
-      console.log('[Bob - PowerToys] No task owns this breakpoint — was it set outside Bob?');
+      console.log('[Bob - PowerToys] No task owns this breakpoint - was it set outside Bob?');
       return false;
     }
 
@@ -144,10 +130,10 @@ async function notifyBobOfBreakpointHit(
  * Flush any queued notifications once Bob is idle again.
  * Call this periodically or hook it to a task event.
  */
-export async function flushPendingNotifications(bobExports: any): Promise<void> {
+export async function flushPendingNotifications(): Promise<void> {
   if (pendingNotifications.length === 0) return;
 
-  const taskManager = bobExports?.taskManager;
+  const taskManager = getTaskManager();
   if (!taskManager?.getChatManagerByTaskId) return;
 
   // Drain the queue, grouped by taskId

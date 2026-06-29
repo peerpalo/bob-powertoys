@@ -1,8 +1,8 @@
 {
   "name": "bob-powertoys",
   "displayName": "IBM Bob - PowerToys",
-  "description": "Enhanced development tools for IBM Bob: debugging, terminal access, and workspace utilities",
-  "version": "0.3.0",
+  "description": "Enhanced development tools for IBM Bob: debugging, terminal access, and quality-of-life improvements.",
+  "version": "0.4.5",
   "icon": "assets/icon.png",
   "license": "MIT",
   "publisher": "peerpalo",
@@ -30,9 +30,46 @@
     "commands": [
       {
         "command": "bob-powertoys.showStatus",
-        "title": "IBM Bob - PowerToys: Show Status"
+        "category": "IBM Bob - PowerToys",
+        "title": "Show Status"
+      },
+      {
+        "command": "bob-powertoys.newTaskInWindow",
+        "category": "IBM Bob - PowerToys",
+        "title": "New Task In Window",
+        "shortTitle": "New Task In Window"
+      },
+      {
+        "command": "bob-powertoys.openTaskInWindow",
+        "category": "IBM Bob - PowerToys",
+        "title": "Open Task In Window"
+      },
+      {
+        "command": "bob-powertoys.openTaskInEditor",
+        "category": "IBM Bob - PowerToys",
+        "title": "Open Task In Editor"
       }
     ],
+    "menus": {
+      "bob-code.moreOptions": [
+        {
+          "command": "bob-powertoys.newTaskInWindow",
+          "group": "options@1.5"
+        }
+      ],
+      "webview/context": [
+        {
+          "command": "bob-powertoys.openTaskInWindow",
+          "when": "webviewId == bobChatView && bob-powertoys.hasLastSidebarTask",
+          "group": "navigation"
+        },
+        {
+          "command": "bob-powertoys.openTaskInEditor",
+          "when": "webviewId == bobChatView && bob-powertoys.hasLastSidebarTask",
+          "group": "navigation"
+        }
+      ]
+    },
     "configuration": {
       "title": "IBM Bob - PowerToys",
       "properties": {

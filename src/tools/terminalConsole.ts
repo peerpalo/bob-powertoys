@@ -72,10 +72,10 @@ export class ListTerminalsTool {
   // Shared param definition
   private static readonly PARAMS: any[] = [];
 
-  // Property — read by toolToOpenAi(e).parameters
+  // Property - read by toolToOpenAi(e).parameters
   parameters = ListTerminalsTool.PARAMS;
 
-  // Method — read by the newer getParameters(env) paths
+  // Method - read by the newer getParameters(env) paths
   getParameters(_env?: any): any[] {
     return ListTerminalsTool.PARAMS;
   }
@@ -131,10 +131,10 @@ export class GetTerminalOutputTool {
     { name: 'maxChars', type: 'number', detail: `Maximum characters to return (default and max: ${MAX_TERMINAL_OUTPUT_CHARS})`, description: `Maximum characters to return (default and max: ${MAX_TERMINAL_OUTPUT_CHARS})`, required: false, usage: '1000' },
   ];
 
-  // Property — read by toolToOpenAi(e).parameters
+  // Property - read by toolToOpenAi(e).parameters
   parameters = GetTerminalOutputTool.PARAMS;
 
-  // Method — read by the newer getParameters(env) paths
+  // Method - read by the newer getParameters(env) paths
   getParameters(_env?: any): any[] {
     return GetTerminalOutputTool.PARAMS;
   }
@@ -215,10 +215,10 @@ export class SearchTerminalOutputTool {
     { name: 'maxChars', type: 'number', detail: `Maximum characters to return in matches (default and max: ${MAX_TERMINAL_OUTPUT_CHARS})`, description: `Maximum characters to return in matches (default and max: ${MAX_TERMINAL_OUTPUT_CHARS})`, required: false, usage: '1000' },
   ];
 
-  // Property — read by toolToOpenAi(e).parameters
+  // Property - read by toolToOpenAi(e).parameters
   parameters = SearchTerminalOutputTool.PARAMS;
 
-  // Method — read by the newer getParameters(env) paths
+  // Method - read by the newer getParameters(env) paths
   getParameters(_env?: any): any[] {
     return SearchTerminalOutputTool.PARAMS;
   }
@@ -329,10 +329,10 @@ export class FocusTerminalTool {
     { name: 'terminalName', type: 'string', detail: 'Name of the terminal to focus (defaults to active terminal)', description: 'Name of the terminal to focus (defaults to active terminal)', required: false, usage: 'bash' },
   ];
 
-  // Property — read by toolToOpenAi(e).parameters
+  // Property - read by toolToOpenAi(e).parameters
   parameters = FocusTerminalTool.PARAMS;
 
-  // Method — read by the newer getParameters(env) paths
+  // Method - read by the newer getParameters(env) paths
   getParameters(_env?: any): any[] {
     return FocusTerminalTool.PARAMS;
   }
