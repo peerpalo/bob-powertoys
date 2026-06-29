@@ -4,7 +4,7 @@ Native debugging and terminal tools for [IBM Bob AI Assistant](https://bob.ibm.c
 
 ## What is IBM Bob - PowerToys?
 
-IBM Bob - PowerToys is a IBM Bob extension that gives Bob direct access to your debugging sessions and terminal output. Bob can set breakpoints, inspect variables, control execution, and read terminal output: all without you having to copy-paste information.
+IBM Bob - PowerToys is an IBM Bob extension (extension ID `IBM.bob-code`) that enhances the assistant with direct access to your debugging sessions and terminal output. It also adds quality-of-life improvements: detaching the chat panel to a separate OS window, and automatically restoring the last active task when you reopen the application. Bob can set breakpoints, inspect variables, control execution, and read terminal output: all without manual copy-pasting.
 
 ## Features
 
@@ -14,6 +14,8 @@ IBM Bob - PowerToys is a IBM Bob extension that gives Bob direct access to your 
 - **Stack Traces**: Get call stacks and navigate frames
 - **Terminal Access**: Read and search terminal output
 - **Automatic Notifications**: Bob is notified when breakpoints are hit
+- **Open Task in New Window**: Detach Bob's chat panel to a separate OS window so you can move it to another monitor
+- **Restore Last Task**: Bob automatically reopens the task you were working on when you restart the application
 
 ## Installation
 
@@ -76,6 +78,24 @@ Once installed, Bob automatically has access to all debugging and terminal tools
 > "Show me the call stack when the database connection fails"
 
 > "Search the terminal for any TypeScript compilation errors"
+
+## Quality of Life
+
+### Open Task in New Window
+
+Move Bob's chat panel to a separate OS window so you can place it on a second monitor while you keep coding in the main one.
+
+**How to use:**
+- Right-click anywhere inside Bob's chat panel and select **Open Task in Window**
+- Or open the `...` menu in Bob's toolbar and select **New Task In Window** to start a fresh task in its own window
+
+https://github.com/user-attachments/assets/2aa249e8-1299-4130-9f02-a5f1c655e921
+
+### Restore Last Task
+
+When you close and reopen the application, Bob automatically reopens the task you were working on. No need to dig through history to find where you left off.
+
+This works silently in the background: the save happens as you use Bob normally, and the restore happens at startup before you even interact with it.
 
 ## Available Tools
 

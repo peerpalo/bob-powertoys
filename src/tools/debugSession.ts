@@ -20,10 +20,10 @@ export class GetActiveDebugSessionTool {
   // Shared param definition
   private static readonly PARAMS: any[] = [];
 
-  // Property — read by toolToOpenAi(e).parameters
+  // Property - read by toolToOpenAi(e).parameters
   parameters = GetActiveDebugSessionTool.PARAMS;
 
-  // Method — read by the newer getParameters(env) paths
+  // Method - read by the newer getParameters(env) paths
   getParameters(_env?: any): any[] {
     return GetActiveDebugSessionTool.PARAMS;
   }
@@ -79,10 +79,10 @@ export class ListDebugConfigurationsTool {
   // Shared param definition
   private static readonly PARAMS: any[] = [];
 
-  // Property — read by toolToOpenAi(e).parameters
+  // Property - read by toolToOpenAi(e).parameters
   parameters = ListDebugConfigurationsTool.PARAMS;
 
-  // Method — read by the newer getParameters(env) paths
+  // Method - read by the newer getParameters(env) paths
   getParameters(_env?: any): any[] {
     return ListDebugConfigurationsTool.PARAMS;
   }
@@ -158,10 +158,10 @@ export class StartDebugSessionTool {
     { name: 'context',    required: false, type: 'string', detail: 'Context hint to help select the right configuration (e.g., "attach", "node", "python")', description: 'Context hint to help select the right configuration (e.g., "attach", "node", "python")', usage: 'attach to running process' },
   ];
 
-  // Property — read by toolToOpenAi(e).parameters
+  // Property - read by toolToOpenAi(e).parameters
   parameters = StartDebugSessionTool.PARAMS;
 
-  // Method — read by the newer getParameters(env) paths
+  // Method - read by the newer getParameters(env) paths
   getParameters(_env?: any): any[] {
     return StartDebugSessionTool.PARAMS;
   }
@@ -309,10 +309,10 @@ export class StopDebugSessionTool {
   // Shared param definition
   private static readonly PARAMS: any[] = [];
 
-  // Property — read by toolToOpenAi(e).parameters
+  // Property - read by toolToOpenAi(e).parameters
   parameters = StopDebugSessionTool.PARAMS;
 
-  // Method — read by the newer getParameters(env) paths
+  // Method - read by the newer getParameters(env) paths
   getParameters(_env?: any): any[] {
     return StopDebugSessionTool.PARAMS;
   }

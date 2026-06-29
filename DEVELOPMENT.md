@@ -2,18 +2,18 @@
 
 ## Project Overview
 
-IBM Bob - PowerToys is a IBM Bob extension that gives Bob direct access to your debugging sessions and terminal output. Bob can set breakpoints, inspect variables, control execution, and read terminal output: all without you having to copy-paste information.
+IBM Bob - PowerToys is an IBM Bob extension (extension ID `IBM.bob-code`) that enhances the assistant with direct access to your debugging sessions and terminal output. It also adds quality-of-life improvements: detaching the chat panel to a separate OS window, and automatically restoring the last active task when you reopen the application. Bob can set breakpoints, inspect variables, control execution, and read terminal output: all without manual copy-pasting.
 
 ## Project Structure
 
 ```
 bob-powertoys/
 ├── src/
-│   ├── extension.ts              # Extension entry point and Bob integration
+│   ├── extension.ts              # Extension entry point and lifecycle
+│   ├── taskManager.ts            # Task commands, last-task persistence
 │   ├── debugAdapter.ts           # Centralized debug adapter tracker
-│   └── tools/                    # Individual tool modules
-│       ├── index.ts              # Exports all tools
-│       ├── utils.ts              # Shared utilities (JSON parsing, frame resolution)
+│   └── tools/                   # Individual tool modules
+│       ├── utils.ts              # Shared utilities: taskManager access, frame resolution
 │       ├── breakpoints.ts        # Breakpoint management (batch operations)
 │       ├── debugControl.ts       # Debug stepping & control
 │       ├── debugConsole.ts       # Debug console & variable inspection
@@ -30,6 +30,8 @@ bob-powertoys/
 └── DEVELOPMENT.md                # This file
 ```
 
+---
+
 ## Architecture
 
 ### High-Level Architecture
@@ -39,23 +41,27 @@ bob-powertoys/
 │                Bob Extension: Bob PowerToys                     │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
-│  ┌──────────────────┐         ┌────────────────────────────┐  │
-│  │  Bob Native API  │         │  Centralized Debug Adapter │  │
-│  │  registerSource  │         │  - Output capture          │  │
-│  │                  │         │  - State tracking          │  │
-│  │  Tool Registry   │◄────────┤  - Breakpoint notifications│  │
-│  └────────┬─────────┘         └────────────────────────────┘  │
+│  ┌──────────────────┐         ┌────────────────────────────┐    │
+│  │  Bob Public API  │         │  Centralized Debug Adapter │    │
+│  │  registerSource  │         │  - Output capture          │    │
+│  │                  │         │  - State tracking          │    │
+│  │  Tool Registry   │◄────────┤  - Breakpoint notifications│    │
+│  └────────┬─────────┘         └────────────────────────────┘    │
 │           │                              ▲                      │
 │           │                              │                      │
-│           │                    ┌─────────┴──────────┐          │
-│           │                    │  VSCode APIs       │          │
-│           │                    │  - Debug API (DAP) │          │
-│           │                    │  - Terminal API    │          │
-│           │                    │  - Workspace API   │          │
-│           │                    └────────────────────┘          │
-│           │                                                     │
-└───────────┼─────────────────────────────────────────────────────┘
-            │
+│           │                    ┌─────────┴──────────┐           │
+│           │                    │  VSCode APIs       │           │
+│           │                    │  - Debug API (DAP) │           │
+│           │                    │  - Terminal API    │           │
+│           │                    │  - Workspace API   │           │
+│           │                    └────────────────────┘           │
+│                                                                 │
+│  ┌──────────────────────────────────────────────────────────┐   │
+│  │  Bob Internal Hack (taskManager extraction)              │   │
+│  │  - extractTaskManager via Array.prototype.find patch     │   │
+│  │  - enables: openTaskInWindow, last-task persistence      │   │
+│  └──────────────────────────────────────────────────────────┘   │
+└───────────┬─────────────────────────────────────────────────────┘
             │ Bob's Native Tool Interface
             │ Direct integration via registerSource
             │ + Automatic breakpoint notifications
@@ -69,65 +75,305 @@ bob-powertoys/
 ### Extension Lifecycle
 
 ```typescript
-activate()
+activate(context)
     ↓
-registerTerminalCapture()     // Terminal shell execution tracking
+extensionContext = context                       // saved module-level for deactivate/saveLastTask
+registerTerminalCapture(context)                 // terminal shell execution tracking
     ↓
-Wait for Bob extension to activate
+bobExtension.activate().then(...)
     ↓
-Get Bob extension exports
+registerPowerToys(context, bobExports)
+    ├── await registerTaskManager(bobExports)    // extract & cache internal taskManager (with retries)
+    ├── await restoreLastTask(context)           // reopen last task from globalState
+    ├── registerLastTaskSave()                   // wrap webview to intercept setCurrentTasks
+    ├── registerDebugAdapterTracker(bobExports)  // DAP event tracking + notifications
+    ├── bobExports.registerSource(...)           // register tool source
+    └── register 23 tools
     ↓
-registerDebugAdapterTracker() // Centralized DAP event tracking + notifications
+Commands registered (independent of Bob):
+    ├── bob-powertoys.showStatus
+    ├── bob-powertoys.newTaskInWindow
+    └── bob-powertoys.openTaskInWindow
     ↓
-Call bobExports.registerSource('bob-powertoys', 'Bob PowerToys')
-    ↓
-Register all 23 tools with the source
-    ↓
-Tools available for Bob immediately
-    ↓
-Automatic breakpoint notifications enabled
-    ↓
-deactivate() → Cleanup
+deactivate() -> statusBarItem.dispose()
 ```
 
-### Bob Native API Integration
+---
+
+## Bob's Public API
+
+`bobExtension.exports` exposes exactly 6 methods:
 
 ```typescript
-// Get Bob extension
-const bobExtension = vscode.extensions.getExtension('IBM.bob-code');
+bobExports.registerSource(id: string, name: string): Source
+bobExports.setFindings(...)
+bobExports.setChatContent(content: string, append: boolean)
+bobExports.openNewTask(...)
+bobExports.startTask(...)
+bobExports.startWorkflow(...)
+```
 
-// Wait for activation if needed
-if (!bobExtension?.isActive) {
-  const disposable = vscode.extensions.onDidChange(() => {
-    const ext = vscode.extensions.getExtension('IBM.bob-code');
-    if (ext?.isActive) {
-      disposable.dispose();
-      registerAllTools(context);
-    }
-  });
-} else {
-  registerAllTools(context);
+The `Source` object returned by `registerSource` exposes:
+
+```typescript
+source.registerTool(tool: Tool): void
+source.onTurnStart(cb: (taskId: string, envs: any, isEmpty: boolean) => void): void
+source.onTurnEnd(cb: () => void): void
+source.onToolWillExecute(cb): void
+source.onToolExecution(cb): void
+source.onToolDidExecute(cb): void
+source.onEntitlementChange(cb): void
+source.onCommandWillExecute(cb): void
+```
+
+**`taskManager` is NOT on the public exports.** It must be extracted via internal hack (see below).
+
+---
+
+## Bob Internal Structures (Reverse-Engineered)
+
+These are minified names in Bob's webpack bundle (`dist/extension.js`). They may change between Bob versions.
+
+| Internal name | What it is |
+|---|---|
+| `N0` | The `_4` class instance = taskManager singleton |
+| `_4` | taskManager class |
+| `J8e` | chatManager class (one per open task panel) |
+| `xi.Instance` | Source registry singleton |
+
+### taskManager (`_4`) - key methods
+
+```typescript
+taskManager.getTopLevelChatManager()          // returns mainPanelTask (sidebar panel chatManager)
+taskManager.openTask({ taskId? })             // opens a task in the sidebar; {} = go home
+taskManager.openTaskInNewTab(taskId)          // opens a task as an editor tab
+taskManager.getChatManagerByTaskId(taskId)    // active task lookup
+taskManager.getOpenChatManagerByRootTaskId(taskId) // backgrounded task lookup
+taskManager.deleteTask(taskId)
+taskManager.cancelTask(taskId)
+taskManager.renameTask(taskId, name)
+taskManager.getTaskMetadata(taskId)
+taskManager.store.onEvent(cb)                 // fires task.created / task.opened / task.updated / task.deleted / task.status / task.cancelled
+```
+
+### chatManager (`J8e`) - key methods
+
+```typescript
+chatManager.getTaskId()                       // current task ID (numeric string)
+chatManager.isEmpty()                         // true when on home/new-task screen
+chatManager.isProcessing()                    // true while Bob is running a turn
+chatManager.handleInputMessage(msg, task)     // inject a user message
+chatManager.pushSessionHistory()              // refresh history panel
+chatManager.onWebviewSet(cb)                  // fires every time the webview becomes ready
+chatManager.onceWebviewUnset(cb)              // fires once when webview is closed/unset
+chatManager._webview                          // the active webview wrapper (Q1 class)
+chatManager.view                              // alias (same object in some contexts)
+```
+
+### webview wrapper - key methods
+
+```typescript
+webview.sendMessage(msg)                      // send a message to the webview HTML
+webview.onMessage(type, handler)              // register a handler for a webview->extension message
+webview.onDispose(cb)                         // fires when the webview panel is disposed
+webview.isPanel                               // true when displayed as editor tab (not sidebar)
+webview.view                                  // underlying VSCode WebviewPanel (has onDidChangeViewState)
+```
+
+---
+
+## taskManager Extraction Hack
+
+Bob does not expose `taskManager` in its public API. We obtain it by temporarily patching `Array.prototype.find`:
+
+```
+bobExports.setChatContent('', false)
+  └─► chatManager.getTopLevelChatManager()
+        └─► this._chatManagers.find(e => e.view?.isPanel === false)
+              └─► Array.prototype.find fires with this = _chatManagers array
+                    └─► this[0].taskManager  ← that's N0 ✓
+```
+
+The patch lives for a single synchronous call and is removed in a `finally` block.
+
+**Returns `null` if no chat managers exist yet** (Bob panel not yet rendered). `registerTaskManager` retries up to 3 times with a 1-second delay to handle this race.
+
+```typescript
+// src/tools/utils.ts
+export async function registerTaskManager(bobExports: any): Promise<void> {
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    const tm = bobExports?.taskManager ?? extractTaskManager(bobExports);
+    if (tm != null) { _cachedTaskManager = tm; return; }
+    if (attempt < 3) await new Promise(r => setTimeout(r, 1000));
+  }
+  throw new Error('taskManager not available after all retries');
 }
 
-// Register tools
-function registerAllTools(context: vscode.ExtensionContext) {
-  const bobExports = bobExtension.exports;
-  
-  // Register centralized debug adapter tracker
-  const debugAdapterDisposable = registerDebugAdapterTracker(bobExports);
-  context.subscriptions.push(debugAdapterDisposable);
-  
-  const source = bobExports.registerSource('bob-powertoys', 'Bob PowerToys');
-  
-  // Register each tool
-  registerBreakpointTools(source);
-  registerDebugControlTools(source);
-  registerDebugConsoleTools(source);
-  registerDebugSessionTools(source);
-  registerTerminalConsoleTools(source);
-  registerUniverseAnswerTool(source);
+export function getTaskManager(): any {
+  return _cachedTaskManager;
 }
 ```
+
+---
+
+## Commands
+
+| Command ID | Title (palette) | Where it appears |
+|---|---|---|
+| `bob-powertoys.showStatus` | IBM Bob - PowerToys: Show Status | Command palette |
+| `bob-powertoys.newTaskInWindow` | IBM Bob - PowerToys: New Task In Window | `bob-code.moreOptions` dropdown (the "..." button) |
+| `bob-powertoys.openTaskInWindow` | IBM Bob - PowerToys: Open Task In Window | Right-click inside Bob's webview (`webview/context`) |
+| `bob-powertoys.openTaskInEditor` | IBM Bob - PowerToys: Open Task In Editor | Right-click inside Bob's webview (`webview/context`) |
+
+> **Note:** "New Task In Editor" is intentionally absent - Bob already provides this action in its own "More Options" (`...`) menu, so we don't duplicate it.
+
+Both `openTaskInWindow` and `openTaskInEditor` are gated by the `bob-powertoys.hasLastSidebarTask` context key - they only appear in the right-click menu when a sidebar task is currently active.
+
+### openTaskInWindow logic
+
+1. `getTaskManager().getTopLevelChatManager()` - get the sidebar chatManager
+2. Check `chatManager.isEmpty()` - if `true`, user is on the home screen (no real task)
+3. If a task is active:
+   - `taskManager.openTask({})` - navigate sidebar back to home (releases the panel)
+   - `taskManager.openTaskInNewTab(taskId)` - open as an editor tab
+   - `workbench.action.moveEditorToNewWindow` - pop the tab into a new OS window
+4. If no active task: `bob-code.task.pickWorkspaceInEditor` + `moveEditorToNewWindow`
+
+### openTaskInEditor logic
+
+Identical to `openTaskInWindow` but **omits** the final `moveEditorToNewWindow` step - the task opens as an editor tab in the current window.
+
+1. `getTaskManager().getTopLevelChatManager()` - get the sidebar chatManager
+2. Check `chatManager.isEmpty()` - if `true`, user is on the home screen
+3. If a task is active:
+   - `taskManager.openTask({})` - navigate sidebar back to home
+   - `taskManager.openTaskInNewTab(taskId)` - open as an editor tab in the current window
+4. If no active task: `bob-code.task.pickWorkspaceInEditor` (opens a task picker as a tab)
+
+---
+
+## Last-Task Persistence
+
+On every session restart, Bob shows the home screen. We save and restore both the sidebar task and all editor-tab tasks using `ExtensionContext.globalState`.
+
+### Scope
+
+| Location | Tracked? | globalState key | Restore call |
+|---|---|---|---|
+| Sidebar (`isPanel === false`) | single task ID | `bob-powertoys.lastSidebarTaskId` | `openTask({ taskId })` |
+| Editor tab (`isPanel === true`) | set of `{ taskId, viewColumn }` per window | `bob-powertoys.tabsTaskIds` | `openTaskInNewTab(taskId)` + `panel.reveal(col)` |
+| New OS window | via per-window bucket in `tabsTaskIds` | same key, different bucket | each window restores its own bucket independently |
+
+### Module-level state
+
+```typescript
+let lastSidebarTaskId: string | undefined;
+```
+
+This variable mirrors `globalState`. It drives the `bob-powertoys.hasLastSidebarTask` context key which controls the right-click menu entry visibility.
+
+### Storage types
+
+```typescript
+interface TabEntry { taskId: string; viewColumn: number; }
+type TabsStore = Record<string, TabEntry[]>; // windowKey → entries
+```
+
+`TABS_TASK_IDS_KEY` stores a `TabsStore` - a map from window fingerprint to the list of tab entries for that window. Each entry records both the task ID and its editor column so it can be restored to the same position.
+
+### Window fingerprint (`windowKey()`)
+
+Each OS window gets a unique key computed from:
+
+```typescript
+function windowKey(): string {
+  const cols = vscode.window.tabGroups.all
+    .map(g => g.viewColumn).sort().join(',');
+  return `${vscode.env.sessionId}:${cols}`;
+}
+```
+
+`vscode.window.tabGroups.all` is **scoped to the current OS window** - each window's extension host only sees its own tab groups. Combined with `sessionId` as a session salt, this produces a key that is stable within a window's lifetime and unique across windows even on the same workspace.
+
+### Save: webview message interception
+
+`wrapWebviewSendMessage(context, chatManager, isPanel)` patches `chatManager._webview.sendMessage` to intercept `setCurrentTasks`. Bob sends this message to both sidebar and tab webviews whenever the active task changes - it fires reliably with no shutdown race.
+
+```typescript
+wv.sendMessage = (msg) => {
+  if (msg?.type === 'setCurrentTasks') {
+    const hasTasks = (msg.tasks?.length ?? 0) > 0;
+    if (!isPanel || hasTasks) saveTasks(context, chatManager, isPanel);
+  }
+  return originalSend(msg);
+};
+```
+
+- **Sidebar** (`isPanel === false`): fires on every message including empty - clears state when user navigates home
+- **Tab** (`isPanel === true`): only fires when `tasks.length > 0` - ignores the empty home-screen signal
+
+For tabs, `wrapWebviewSendMessage` also hooks `wv.onDispose` to call `removeTabTask` when the tab is closed.
+
+### Save: openTask patch (tab chatManager interception)
+
+Tab chatManagers are created on-demand inside `openTask`. We intercept them by patching `taskManager.openTask` in `registerTaskPersistence`:
+
+```typescript
+taskManager.openTask = async (opts) => {
+  const result = await originalOpenTask(opts);
+  if (result?._webview?.isPanel === true)
+    wrapWebviewSendMessage(context, result, true);
+  return result;
+};
+```
+
+Guarded by `__bobPowerToysPatched` so it is applied exactly once.
+
+### Save: tab data written
+
+`saveTasks` (tab branch) reads `panel.viewColumn` from `chatManager._webview.view` (the underlying `vscode.WebviewPanel`) and upserts the entry under the current `windowKey()`. If the user moves the tab to a different column, the next `setCurrentTasks` updates the stored `viewColumn`.
+
+### Restore: on startup
+
+`restoreTasks(context)` is called once in `registerPowerToys` after `registerTaskPersistence` (so the `openTask` patch is already in place before any `openTaskInNewTab` calls).
+
+1. **Sidebar**: reads `LAST_SIDEBAR_TASK_ID_KEY`, calls `openTask({ taskId })`. Clears state if the task no longer exists.
+2. **Tabs**: reads the `TabsStore`, finds the bucket for `windowKey()`, calls `openTaskInNewTab(taskId)` for each entry, then `panel.reveal(viewColumn, true)` to restore the original column position.
+3. **Blank window guard**: if both the sidebar key and the tab bucket are empty, the window was reopened blank by VSCode's session restore with nothing to show - it is closed via `workbench.action.closeWindow`.
+
+Each OS window's extension host runs `restoreTasks` independently and only restores its own bucket. Other windows' buckets are left untouched for their own hosts to handle.
+
+### Cleanup: tab closed
+
+`removeTabTask` is called from the `wv.onDispose` hook registered in `wrapWebviewSendMessage`. It removes the entry from the bucket under `windowKey()` and cleans up the key from `globalState` if the bucket becomes empty.
+
+### Context key: bob-powertoys.hasLastSidebarTask
+
+| Value | When |
+|---|---|
+| `true` | A sidebar task has been saved (set by `saveTasks` or `restoreTasks`) |
+| `false` | Home screen active, task deleted, or first ever launch |
+
+Used in `package.json` as: `"when": "webviewId == bobChatView && bob-powertoys.hasLastSidebarTask"`
+
+### What was tried and why it didn't work
+
+| Approach | Problem |
+|---|---|
+| `deactivate()` returning `Thenable<void>` | VSCode doesn't reliably await it before killing the process |
+| `context.subscriptions.push({ dispose: () => save() })` | Same issue - async writes are lost at shutdown |
+| `vscode.window.onDidChangeWindowState` | Works but fires on every focus change - noisy |
+| `source.onTurnStart` | Requires user to send a message first |
+| `chatManager.onWebviewSet` / `onceWebviewUnset` | Did not fire from outside Bob's own code |
+| `taskManager.store.onEvent` | Did not fire from outside Bob's own code |
+| `panel.onDidChangeViewState` | Did not fire reliably |
+| `vscode.env.sessionId` as window key | Same value across all OS windows in a session |
+| `WebviewPanelSerializer` anchor panel | `registerPowerToys` only runs in main window - serializer fires in secondary windows before Bob activates |
+| **webview `sendMessage` intercept** | **Works - fires on every task change during normal use** |
+| **`taskManager.openTask` patch** | **Works - intercepts every new tab chatManager before it becomes active** |
+| **`tabGroups.all` viewColumn fingerprint** | **Works - window-scoped, unique per OS window** |
+
+---
 
 ## Configuration Settings
 
@@ -135,518 +381,256 @@ function registerAllTools(context: vscode.ExtensionContext) {
 
 Controls when Bob is automatically notified about breakpoint hits.
 
-**Values:**
-- `disabled`: Never notify Bob when breakpoints are hit
-- `bobOnly` (default): Only notify for breakpoints set through Bob's tools
-- `all`: Notify for all breakpoint hits regardless of source
-
-**Access:** Bob Settings > Extensions > IBM Bob - PowerToys
-
-**Implementation Details:**
-
-1. **Configuration in package.json:**
-```json
-{
-  "configuration": {
-    "title": "IBM Bob - PowerToys",
-    "properties": {
-      "breakpointNotifications": {
-        "type": "string",
-        "enum": ["disabled", "bobOnly", "all"],
-        "enumDescriptions": [
-          "Never notify Bob when breakpoints are hit",
-          "Only notify Bob for breakpoints set through Bob's tools (default)",
-          "Notify Bob for all breakpoint hits, regardless of how they were set"
-        ],
-        "default": "bobOnly",
-        "description": "Controls when Bob is automatically notified about breakpoint hits"
-      }
-    }
-  }
-}
-```
-
-2. **Breakpoint Source Tracking (breakpoints.ts):**
-```typescript
-// Set of breakpoints that were set by Bob (via set_breakpoints tool)
-// Format: "file:line" (normalized file path)
-const bobSetBreakpoints = new Set<string>();
-
-// Check if a breakpoint was set by Bob
-export function isBobSetBreakpoint(file: string, line: number): boolean {
-  const normalizedFile = path.normalize(file);
-  const key = `${normalizedFile}:${line}`;
-  return bobSetBreakpoints.has(key);
-}
-
-// Mark a breakpoint as set by Bob (called in SetBreakpointsTool)
-function markAsBobSet(file: string, line: number): void {
-  const normalizedFile = path.normalize(file);
-  const key = `${normalizedFile}:${line}`;
-  bobSetBreakpoints.add(key);
-}
-
-// Unmark a breakpoint (called in RemoveBreakpointsTool)
-function unmarkAsBobSet(file: string, line: number): void {
-  const normalizedFile = path.normalize(file);
-  const key = `${normalizedFile}:${line}`;
-  bobSetBreakpoints.delete(key);
-}
-```
-
-3. **Notification Logic (debugAdapter.ts):**
-```typescript
-async function notifyBobOfBreakpointHit(
-  info: { file: string; line: number; stackTrace: any; variables: any; output: string }
-): Promise<boolean> {
-  // Read configuration setting
-  const config = vscode.workspace.getConfiguration();
-  const notificationMode = config.get<string>('breakpointNotifications', 'bobOnly');
-
-  // If disabled, skip notification
-  if (notificationMode === 'disabled') {
-    return false;
-  }
-
-  // If bobOnly mode, check if this breakpoint was set by Bob
-  if (notificationMode === 'bobOnly') {
-    if (!isBobSetBreakpoint(info.file, info.line)) {
-      return false;
-    }
-  }
-
-  // If we reach here, either mode is "all" or mode is "bobOnly" and breakpoint was set by Bob
-  // ... proceed with notification
-}
-```
-
-**Use Cases:**
-- **disabled**: User wants complete control, no automatic notifications
-- **bobOnly** (default): Prevents notification spam from user-set breakpoints while still notifying for Bob-assisted debugging
-- **all**: User wants comprehensive debugging awareness, Bob notified for every breakpoint hit
-
-## Detailed Tool Documentation
-
-### Breakpoint Management Tools
-
-#### set_breakpoints
-Set multiple breakpoints at once with optional conditions.
-
-**Parameters:**
-```json
-{
-  "breakpoints": [
-    {
-      "file": "/path/to/file.ts",
-      "line": 42,
-      "condition": "x > 10"
-    }
-  ]
-}
-```
-
-**Returns:**
-```json
-{
-  "summary": "2 set, 0 warnings",
-  "details": [
-    {
-      "file": "src/app.ts",
-      "line": 42,
-      "status": "success",
-      "message": "Set with condition: x > 10"
-    }
-  ]
-}
-```
-
-**Implementation Notes:**
-- Automatically marks breakpoints as "Bob-set" for notification filtering
-- Uses `markAsBobSet()` after successful verification
-- Supports batch operations for efficiency
-
-#### remove_breakpoints
-Remove multiple breakpoints by file and line.
-
-**Parameters:**
-```json
-{
-  "breakpoints": [
-    {
-      "file": "/path/to/file.ts",
-      "line": 42
-    }
-  ]
-}
-```
-
-**Implementation Notes:**
-- Automatically unmarks breakpoints using `unmarkAsBobSet()`
-- Cleans up tracking state when breakpoints are removed
-
-#### list_breakpoints
-List all active breakpoints.
-
-**Parameters:** None
-
-**Returns:**
-```json
-{
-  "count": 2,
-  "breakpoints": [
-    {
-      "file": "src/app.ts",
-      "line": 42,
-      "condition": "x > 10",
-      "verified": true
-    }
-  ]
-}
-```
-
-### Debug Control Tools
-
-All debug control tools return structured JSON:
-```json
-{
-  "action": "step_over",
-  "status": "success",
-  "session": "Node: Launch Program"
-}
-```
-
-- **step_over**: Step over current line
-- **step_into**: Step into function call
-- **step_out**: Step out of current function
-- **continue**: Continue execution until next breakpoint
-- **pause**: Pause execution
-
-### Debug Console & Inspection Tools
-
-#### evaluate_expression
-Evaluate expression with automatic frame resolution.
-
-**Parameters:**
-```json
-{
-  "expression": "myVariable + 10",
-  "frameId": 0,
-  "context": "repl",
-  "expand": true
-}
-```
-
-- `frameId` (optional): Frame to evaluate in (0 = auto-resolve to top frame)
-- `context` (optional): "repl", "watch", or "hover"
-- `expand` (optional): Auto-expand object references
-
-#### get_variables
-Get variables from a variables reference.
-
-**Parameters:**
-```json
-{
-  "variablesReference": 1001,
-  "filter": "named"
-}
-```
-
-#### get_stack_trace
-Get call stack with automatic thread resolution.
-
-**Parameters:**
-```json
-{
-  "threadId": 1,
-  "startFrame": 0,
-  "levels": 20
-}
-```
-
-- `threadId` (optional): Thread to get stack from (auto-resolves to current)
-
-#### get_scopes
-Get variable scopes with automatic frame resolution.
-
-**Parameters:**
-```json
-{
-  "frameId": 0
-}
-```
-
-- `frameId` (optional): Frame to get scopes from (0 = auto-resolve)
-
-#### set_variable
-Modify a variable's value during debugging.
-
-**Parameters:**
-```json
-{
-  "variablesReference": 1001,
-  "name": "myVariable",
-  "value": "42"
-}
-```
-
-#### get_debug_output
-Get captured debug console output.
-
-**Parameters:**
-```json
-{
-  "lines": 100,
-  "category": "console"
-}
-```
-
-- Categories: "console", "stdout", "stderr"
-
-### Debug Session Management Tools
-
-#### get_active_debug_session
-Get information about the active debug session.
-
-**Parameters:** None
-
-**Returns:**
-```json
-{
-  "name": "Node: Launch Program",
-  "type": "node",
-  "id": "session-id"
-}
-```
-
-#### list_debug_configurations
-List all debug configurations from launch.json.
-
-**Parameters:** None
-
-**Returns:**
-```json
-{
-  "configurations": [
-    {
-      "name": "Launch Program",
-      "type": "node",
-      "request": "launch"
-    }
-  ]
-}
-```
-
-#### start_debug_session
-Start debugging with smart configuration selection.
-
-**Parameters:**
-```json
-{
-  "configName": "Launch Program",
-  "context": "node app.js"
-}
-```
-
-- `configName` (optional): Specific config to use
-- `context` (optional): Helps select best config automatically
-
-**Smart Selection Logic:**
-1. If `configName` provided: exact match
-2. If only one config: use it
-3. If multiple configs with `context`:
-   - Match by name
-   - Match by config content (program, cwd, etc.)
-   - Prefer "attach" if context mentions running process
-4. Default: prefer "launch" over "attach"
-
-#### stop_debug_session
-Stop the active debug session.
-
-**Parameters:** None
-
-### Terminal Console Tools
-
-#### list_terminals
-List all open terminals with status.
-
-**Parameters:** None
-
-**Returns:**
-```json
-{
-  "terminals": [
-    {
-      "name": "bash",
-      "active": true,
-      "hasOutput": true
-    }
-  ]
-}
-```
-
-#### get_terminal_output
-Get recent terminal output (max 200 characters).
-
-**Parameters:**
-```json
-{
-  "terminalName": "bash",
-  "maxChars": 200
-}
-```
-
-- `terminalName` (optional): Defaults to active terminal
-- Output is ANSI-stripped for clean reading
-- Returns last N characters (not lines)
-
-#### search_terminal_output
-Search terminal output with regex pattern.
-
-**Parameters:**
-```json
-{
-  "query": "error|warning",
-  "terminalName": "bash",
-  "maxChars": 200
-}
-```
-
-- Case-insensitive regex search
-- Returns matching content up to character limit
-
-#### focus_terminal
-Bring a terminal into focus.
-
-**Parameters:**
-```json
-{
-  "terminalName": "bash"
-}
-```
+| Value | Behavior |
+|---|---|
+| `disabled` | Never notify Bob |
+| `bobOnly` | Only notify for breakpoints set via Bob's tools (default) |
+| `all` | Notify for all breakpoint hits |
+
+---
 
 ## Key Components
 
-### 1. extension.ts (~150 lines)
+### 1. extension.ts
 
-**Purpose**: Extension lifecycle management and Bob integration
+**Purpose**: Extension lifecycle and Bob integration only. No task or persistence logic.
 
-**Key Functions**:
-- `activate()`: Entry point, registers event captures and Bob tools
-- `registerAllTools()`: Registers all 23 tools with Bob's source and centralized debug adapter
-- `registerTerminalCapture()`: Captures terminal output via shell execution events
+**Key functions**:
+- `activate(context)` - entry point; registers status bar, waits for Bob, calls `registerTaskCommands`
+- `registerPowerToys(context, bobExports)` - awaits `registerTaskManager`, then `registerTaskPersistence` + `restoreTasks`, then registers debug tracker and all 23 tools
+- `showStatus()` / `showStatusBarError()` - status bar management
 
-**Bob Integration**:
-- Waits for Bob extension to activate
-- Gets Bob's public API via `exports`
-- Registers centralized debug adapter tracker
-- Creates tool source with `registerSource()`
-- Registers all tools with the source
+### 2. taskManager.ts
 
-### 2. debugAdapter.ts (~220 lines)
+**Purpose**: All task-related concerns: window commands, task persistence (sidebar + tabs), webview interception.
 
-**Purpose**: Centralized debug adapter tracker for state management and automatic notifications
-
-**Key Features**:
-- **Single source of truth**: Eliminates race conditions from duplicate trackers
-- **Shared state**: `currentStoppedState` used by all debug tools
-- **Output capture**: Captures debug console output via DAP events
-- **Automatic notifications**: Notifies Bob when breakpoints are hit
-- **Smart queueing**: Queues notifications during Bob's streaming
-
-**Exported Functions**:
+**Exported functions**:
 ```typescript
-export function getCurrentStoppedState(): { threadId: number; frameId?: number } | undefined
-export function getRecentDebugOutput(lineCount: number = 20): string
-export function registerDebugAdapterTracker(bobExports: any): vscode.Disposable
-export async function flushPendingNotifications(bobExports: any): Promise<void>
+registerTaskCommands(context): void       // registers newTaskInWindow + openTaskInWindow
+registerTaskPersistence(context): void    // wraps sidebar webview + patches taskManager.openTask for tabs
+restoreTasks(context): Promise<void>      // restores sidebar task + tab tasks; closes blank windows
 ```
 
-**Notification System**:
+**Internal types**:
 ```typescript
-async function safeNotify(task: any, message: string): Promise<boolean> {
-  // Check if Bob is idle or actively working
-  const isIdle = !task.isStreaming && !task.isWaitingForFirstChunk;
-  
-  // Queue if streaming or not idle
-  if (lastMsg?.partial === true || !isIdle) {
-    pendingNotifications.push(message);
-    return false;
-  }
-  
-  // Submit message when Bob is idle
-  await task.submitUserMessage(message, []);
-  return true;
-}
+interface TabEntry { taskId: string; viewColumn: number; }
+type TabsStore = Record<string, TabEntry[]>; // windowKey → entries
 ```
 
-**Breakpoint Hit Detection**:
-- Listens for DAP `stopped` events with `reason: 'breakpoint'`
-- Fetches stack trace and local variables
-- Calls `notifyBobOfBreakpointHit()` with breakpoint info
-- Message format: `Breakpoint hit at file:line`
+**Internal state**:
+- `lastSidebarTaskId: string | undefined` - mirrors globalState, drives the context key
+- `wrappedWebviews: WeakSet` - prevents double-patching the same webview object
+- `LAST_SIDEBAR_TASK_ID_KEY` - globalState key (`bob-powertoys.lastSidebarTaskId`)
+- `TABS_TASK_IDS_KEY` - globalState key (`bob-powertoys.tabsTaskIds`) - `TabsStore` JSON
+- `HAS_LAST_SIDEBAR_TASK_CTX` - VSCode context key (`bob-powertoys.hasLastSidebarTask`)
 
-### 3. tools/utils.ts (~80 lines)
+**Private functions**:
+- `windowKey()` - returns `sessionId:cols` fingerprint unique per OS window
+- `wrapWebviewSendMessage(context, chatManager, isPanel)` - patches `sendMessage`; for tabs also hooks `wv.onDispose`
+- `saveTasks(context, chatManager, isPanel)` - sidebar: writes taskId + context key; tab: upserts `TabEntry` with viewColumn
+- `removeTabTask(context, taskId)` - removes entry from the current window's bucket (called from `onDispose`)
 
-**Purpose**: Shared utility functions for all tools
+### 3. debugAdapter.ts
 
-**Key Functions**:
+**Purpose**: Centralized debug adapter tracker - output capture, state tracking, breakpoint notifications.
+
+**Exported functions**:
 ```typescript
-// Parse JSON string parameters from Bob
-export function parseJsonParameter<T>(param: string | T, paramName: string): T
-
-// Resolve frame ID with validation (must be > 0)
-export async function resolveFrameId(
-  frameId: number | undefined | null,
-  resolveTopFrame: () => Promise<number | undefined>
-): Promise<number | undefined>
+getCurrentStoppedState(): { threadId: number; frameId?: number } | undefined
+getRecentDebugOutput(lineCount?: number): string
+registerDebugAdapterTracker(bobExports: any): vscode.Disposable
+flushPendingNotifications(): Promise<void>
 ```
 
-**Why Needed**:
-- Bob sends complex parameters (arrays, objects) as JSON strings
-- Frame IDs <= 0 are invalid and need resolution to top frame
-- Centralized error handling for parameter parsing
+**Notification routing**:
+- On DAP `stopped` with `reason: breakpoint`, fetches stack trace + local variables
+- `getBreakpointOwner(file, line)` looks up which Bob task set that breakpoint
+- `findTaskChatManager(taskManager, taskId)` does escalating lookup: active -> backgrounded
+- `safeNotify(chatManager, taskId, message)` injects the message into the correct task
+
+### 4. tools/utils.ts
+
+**Purpose**: Shared utilities - taskManager lifecycle, chat manager lookup, frame resolution.
+
+**Exported functions**:
+```typescript
+extractTaskManager(bobExports: any): any           // internal hack, sync
+registerTaskManager(bobExports: any): Promise<void> // resolves + caches, with retries
+getTaskManager(): any                               // returns cached instance
+findTaskChatManager(taskManager, taskId): any|null  // active + backgrounded lookup
+resolveFrameId(frameId, resolveTopFrame): Promise<number|undefined>
+```
 
 ### 4. Bob's Tool Interface
 
-Each tool must implement the following interface:
+Each tool implements:
 
 ```typescript
 class MyTool {
   static id = 'my_tool';
   groups = ['read']; // or ['edit']
+  parameters = [{ name, required, type, description, usage }];
+
+  getId(): string
+  getDescription(options?: any): string      // full system-prompt description
+  getCostEffectiveDescription(): string      // brief description for tool selection
+  toolUseDescription(params: any): string    // shown during execution
+  async call(context: { parameters, pushResult, pushError }): Promise<void>
+}
+```
+
+### 5. tools/ Directory
+
+| File | Tools | Count |
+|---|---|---|
+| `breakpoints.ts` | `set_breakpoints`, `remove_breakpoints`, `list_breakpoints` | 3 |
+| `debugControl.ts` | `step_over`, `step_into`, `step_out`, `continue_execution`, `pause_execution` | 5 |
+| `debugConsole.ts` | `evaluate_expression`, `get_variables`, `get_stack_trace`, `get_scopes`, `set_variable`, `get_debug_output` | 6 |
+| `debugSession.ts` | `get_active_debug_session`, `list_debug_configurations`, `start_debug_session`, `stop_debug_session` | 4 |
+| `terminalConsole.ts` | `list_terminals`, `get_terminal_output`, `search_terminal_output`, `focus_terminal` | 4 |
+| `universeAnswer.ts` | `answer_to_life_universe_and_everything` | 1 |
+| **Total** | | **23** |
+
+---
+
+## Complete Tool Reference (23 Tools)
+
+### Breakpoint Tools (3)
+| Tool | Description |
+|---|---|
+| `set_breakpoints` | Set one or more breakpoints (supports conditions) |
+| `remove_breakpoints` | Remove breakpoints by file/line |
+| `list_breakpoints` | List all current breakpoints |
+
+### Debug Control Tools (5)
+| Tool | Description |
+|---|---|
+| `step_over` | Step over the current line |
+| `step_into` | Step into a function call |
+| `step_out` | Step out of the current function |
+| `continue_execution` | Continue execution until next breakpoint |
+| `pause_execution` | Pause a running debug session |
+
+### Debug Console Tools (6)
+| Tool | Description |
+|---|---|
+| `evaluate_expression` | Evaluate an expression in the debug context |
+| `get_variables` | Get variables in the current scope |
+| `get_stack_trace` | Get the current call stack |
+| `get_scopes` | Get available variable scopes |
+| `set_variable` | Set a variable value |
+| `get_debug_output` | Get recent debug console output |
+
+### Debug Session Tools (4)
+| Tool | Description |
+|---|---|
+| `get_active_debug_session` | Get info about the current debug session |
+| `list_debug_configurations` | List available launch configurations |
+| `start_debug_session` | Start a debug session by name |
+| `stop_debug_session` | Stop the current debug session |
+
+### Terminal Console Tools (4)
+| Tool | Description |
+|---|---|
+| `list_terminals` | List all open terminals |
+| `get_terminal_output` | Get recent output from a terminal |
+| `search_terminal_output` | Search terminal output for a pattern |
+| `focus_terminal` | Focus a specific terminal |
+
+### Easter Egg (1)
+| Tool | Description |
+|---|---|
+| `answer_to_life_universe_and_everything` | Returns 42 |
+
+---
+
+## Development Setup
+
+### Prerequisites
+- Node.js 18+
+- VSCode with IBM Bob extension installed
+- TypeScript
+
+### Installation
+```bash
+npm install
+```
+
+### Build
+```bash
+npm run compile          # one-shot build
+npm run watch            # watch mode
+```
+
+### Running the Extension
+1. Open this project in VSCode
+2. Press `F5` to launch Extension Development Host
+3. In the new VSCode window, open a project and start a debug session
+
+---
+
+## Development Workflow
+
+1. Edit source in `src/`
+2. `npm run compile` (or watch mode)
+3. Press `F5` to open Extension Development Host
+4. Open Bob's **Output** channel or the **Developer Tools** console (`Help -> Toggle Developer Tools`) to see `[Bob - PowerToys]` logs
+
+### Key debug log lines to watch for
+
+```
+[Bob - PowerToys] Extension activating...
+[Bob - PowerToys] taskManager obtained via internal hack
+[Bob - PowerToys] webview sendMessage wrapped
+[Bob - PowerToys] setCurrentTasks intercepted, tasks: 1
+[Bob - PowerToys] Saving last task: <taskId>
+[Bob - PowerToys] Restoring last task: <taskId>
+[Bob - PowerToys] Successfully registered 23 tools with Bob
+```
+
+---
+
+## Adding New Tools
+
+### Step-by-Step Guide
+
+1. **Create tool class** in the appropriate `tools/*.ts` file:
+
+```typescript
+class MyNewTool {
+  static id = 'my_new_tool';
+  groups = ['read'];
   parameters = [
     {
       name: 'param1',
       required: true,
       type: 'string',
-      description: 'Parameter description',
-      usage: 'Example usage'
+      description: 'What this parameter does',
+      usage: 'example value'
     }
   ];
 
-  getId(): string {
-    return MyTool.id;
-  }
+  getId(): string { return MyNewTool.id; }
 
-  getDescription(options?: any): string {
-    return `## my_tool
-Description: Full description for system prompt
+  getDescription(): string {
+    return `## my_new_tool
+Description: What this tool does
 
 Parameters:
-- param1: (required) string. Description
+- param1: (required) string. What this parameter does
 
 Usage:
-<my_tool>
-<param1>value</param1>
-</my_tool>`;
+<my_new_tool>
+<param1>example value</param1>
+</my_new_tool>`;
   }
 
   getCostEffectiveDescription(): string {
-    return 'Brief description for tool selection';
+    return 'Brief one-liner for tool selection';
   }
 
   toolUseDescription(params: any): string {
-    return 'Description shown during execution';
+    return `Running my_new_tool with ${params.param1}`;
   }
 
   async call(context: {
@@ -654,467 +638,66 @@ Usage:
     pushResult: (text: string) => void;
     pushError: (text: string) => void;
   }): Promise<void> {
-    // Implementation
-    context.pushResult('Success message');
+    const { param1 } = context.parameters;
+    // implementation
+    context.pushResult(`Done: ${param1}`);
   }
 }
 ```
 
-### 5. tools/ Directory (Modular Tool Organization)
-
-#### tools/index.ts
-**Purpose**: Central registration point for all tools
-
+2. **Register it** in the appropriate `register*Tools(source)` function:
 ```typescript
-export function registerBreakpointTools(source: any) {
-  source.registerTool(new SetBreakpointsTool());
-  source.registerTool(new RemoveBreakpointsTool());
-  source.registerTool(new ListBreakpointsTool());
-}
-
-export function registerDebugControlTools(source: any) {
-  source.registerTool(new StepOverTool());
-  source.registerTool(new StepIntoTool());
-  source.registerTool(new StepOutTool());
-  source.registerTool(new ContinueTool());
-  source.registerTool(new PauseTool());
-}
-
-// ... other tool registrations
+source.registerTool(new MyNewTool());
 ```
 
-#### tools/breakpoints.ts
-**Tools**: `set_breakpoints`, `remove_breakpoints`, `list_breakpoints`
+3. **Update the count** in `extension.ts` and in this document.
 
-**Key Features**:
-- Batch operations (set/remove multiple breakpoints at once)
-- Path normalization and workspace resolution
-- Conditional breakpoint support
-- Verification of breakpoint addition
-- Detailed status reporting
-
-**Implementation Details**:
-- Uses `vscode.debug.addBreakpoints()` for batch setting
-- Path resolution: absolute paths or workspace-relative
-- Verification with 100ms delay for Bob to process
-- Returns structured JSON with success/warning status per breakpoint
-
-#### tools/debugControl.ts
-**Tools**: `step_over`, `step_into`, `step_out`, `continue`, `pause`
-
-**Key Features**:
-- All tools return structured JSON
-- Session name included in response
-- Consistent error handling
-
-**Implementation Details**:
-- Uses `vscode.commands.executeCommand()` for debug actions
-- Checks for active debug session before execution
-- Returns: `{ action: "step_over", status: "success", session: "..." }`
-
-#### tools/debugConsole.ts
-**Tools**: `evaluate_expression`, `get_variables`, `get_stack_trace`, `get_scopes`, `set_variable`, `get_debug_output`
-
-**Key Features**:
-- **Centralized state**: Uses `getCurrentStoppedState()` from debugAdapter
-- **Auto-resolution**: Automatically resolves frame IDs when not provided
-- **Variable expansion**: Automatically expands object references
-- **Debug output access**: Gets output via `getRecentDebugOutput()` from debugAdapter
-
-**Implementation Details**:
-
-1. **Using Centralized State**:
-```typescript
-import { getCurrentStoppedState, getRecentDebugOutput } from '../debugAdapter.js';
-
-async function resolveTopFrameId(session: DebugSession): Promise<number | undefined> {
-  const currentStoppedState = getCurrentStoppedState();
-  
-  // Use cached frame from centralized tracker (fast)
-  if (currentStoppedState?.frameId !== undefined) {
-    return currentStoppedState.frameId;
-  }
-  
-  // Fallback: query if frame not yet resolved
-  if (currentStoppedState?.threadId !== undefined) {
-    const stack = await session.customRequest('stackTrace', {
-      threadId: currentStoppedState.threadId,
-      levels: 1
-    });
-    return stack.stackFrames[0]?.id;
-  }
-  
-  return undefined; // Not paused
-}
-```
-
-2. **Frame ID Validation**:
-```typescript
-// Uses resolveFrameId utility from utils.ts
-const resolvedFrameId = await resolveFrameId(
-  frameId,
-  () => resolveTopFrameId(session)
-);
-
-// Only frameId > 0 is valid
-if (!resolvedFrameId || resolvedFrameId <= 0) {
-  context.pushError('No valid frame available');
-  return;
-}
-```
-
-#### tools/debugSession.ts
-**Tools**: `get_active_debug_session`, `list_debug_configurations`, `start_debug_session`, `stop_debug_session`
-
-**Key Features**:
-- Smart configuration selection based on context
-- JSON5 support via VSCode Configuration API
-- Structured JSON responses
-
-**Implementation Details**:
-
-1. **Configuration Reading**:
-```typescript
-// Uses VSCode API instead of manual JSON parsing
-const config = vscode.workspace.getConfiguration('launch', folder.uri);
-const configurations = config.get<any[]>('configurations');
-```
-
-2. **Smart Config Selection**:
-- If `configName` provided: exact match
-- If only one config: use it
-- If multiple configs with `context`:
-  - Match by name
-  - Match by config content (program, cwd, etc.)
-  - Prefer "attach" if context mentions running process
-- Default: prefer "launch" over "attach"
-
-#### tools/terminalConsole.ts
-**Tools**: `list_terminals`, `get_terminal_output`, `search_terminal_output`, `focus_terminal`
-
-**Key Features**:
-- **Character-based limits** (not line-based)
-- **ANSI stripping** for clean AI-readable output
-- **Shell integration** via `onDidStartTerminalShellExecution`
-- **Terminal object keying** (not name-based)
-
-**Implementation Details**:
-
-1. **Output Capture**:
-```typescript
-const terminalOutputLog = new Map<vscode.Terminal, string[]>();
-const MAX_TERMINAL_OUTPUT_CHARS = 200;
-
-vscode.window.onDidStartTerminalShellExecution(event => {
-  const terminal = event.terminal;
-  (async () => {
-    for await (const chunk of event.execution.read()) {
-      // Strip ANSI codes for clean output
-      terminalOutputLog.get(terminal)?.push(stripAnsi(chunk));
-    }
-  })();
-});
-```
-
-2. **ANSI Stripping**:
-```typescript
-function stripAnsi(str: string): string {
-  return str.replace(/\x1B\[[0-9;]*[mGKHFJK]/g, '');
-}
-```
-
-3. **Character-Based Output**:
-```typescript
-// Join all chunks and take last N characters
-const fullOutput = output.join('');
-const recentOutput = fullOutput.slice(-MAX_TERMINAL_OUTPUT_CHARS);
-```
-
-4. **Search with Character Limit**:
-```typescript
-// Collect matching lines until char limit reached
-for (const line of output) {
-  if (regex.test(line) && totalChars + line.length <= maxChars) {
-    matches.push(line);
-    totalChars += line.length;
-  }
-}
-```
-
-## Complete Tool Reference (23 Tools)
-
-### Breakpoint Tools (3)
-1. **set_breakpoints** - Batch set breakpoints with conditions
-2. **remove_breakpoints** - Batch remove breakpoints
-3. **list_breakpoints** - List all active breakpoints
-
-### Debug Control Tools (5)
-4. **step_over** - Step over current line
-5. **step_into** - Step into function
-6. **step_out** - Step out of function
-7. **continue** - Continue execution
-8. **pause** - Pause execution
-
-### Debug Console Tools (6)
-9. **evaluate_expression** - Evaluate expression with auto frame resolution
-10. **get_variables** - Get variables from reference
-11. **get_stack_trace** - Get call stack with auto thread resolution
-12. **get_scopes** - Get scopes with auto frame resolution
-13. **set_variable** - Modify variable value
-14. **get_debug_output** - Get captured debug console output
-
-### Debug Session Tools (4)
-15. **get_active_debug_session** - Get active session info
-16. **list_debug_configurations** - List launch.json configs
-17. **start_debug_session** - Start debug with smart config selection
-18. **stop_debug_session** - Stop active debug session
-
-### Terminal Console Tools (4)
-19. **list_terminals** - List all terminals with status
-20. **get_terminal_output** - Get last 200 chars of output
-21. **search_terminal_output** - Search output with regex (max 200 chars)
-22. **focus_terminal** - Focus terminal by name
-
-### Easter Egg Tool (1)
-23. **universe_answer** - Returns the answer to life, the universe, and everything
-
-## Development Setup
-
-### Prerequisites
-
-- Node.js 20.x or higher
-- IBM Bob 2.0.0 or higher
-- TypeScript 5.3.2 or higher
-
-### Installation
-
-1. Clone the repository
-2. Install dependencies: `npm install`
-3. Compile: `npm run compile`
-
-### Running the Extension
-
-1. Open project in Bob
-2. Press `F5` to launch Extension Development Host
-3. Extension loads in new Bob window
-4. Tools automatically register with Bob
-
-### Development Workflow
-
-1. **Watch Mode**: `npm run watch` - auto-recompile on changes
-2. **Manual Compile**: `npm run compile`
-3. **Debugging**: F5 to launch, set breakpoints in extension code
-4. **Reload**: `Ctrl+R` / `Cmd+R` in Extension Development Host
-
-## Testing
-
-### Manual Testing
-
-1. Launch extension (F5)
-2. Open debuggable project
-3. Start debug session
-4. Test tools via Bob
-
-### Testing with Bob
-
-1. Launch extension (F5)
-2. Ask Bob to use debugging tools
-3. Verify responses and behavior
-
-## Adding New Tools
-
-### Step-by-Step Guide
-
-1. **Create tool class** in `src/tools/`:
-```typescript
-// src/tools/mytools.ts
-import * as vscode from 'vscode';
-
-export class MyTool {
-  static id = 'my_tool';
-  groups = ['read'];
-  parameters = [
-    {
-      name: 'param',
-      required: true,
-      type: 'string',
-      description: 'Parameter description',
-      usage: 'Example: "value"'
-    }
-  ];
-
-  getId(): string {
-    return MyTool.id;
-  }
-
-  getDescription(options?: any): string {
-    return `## my_tool
-Description: Tool description
-
-Parameters:
-- param: (required) string. Description
-
-Usage:
-<my_tool>
-<param>value</param>
-</my_tool>`;
-  }
-
-  getCostEffectiveDescription(): string {
-    return 'Brief description';
-  }
-
-  toolUseDescription(params: any): string {
-    return `Executing my_tool with ${params.param}`;
-  }
-
-  async call(context: {
-    parameters: { param: string };
-    pushResult: (text: string) => void;
-    pushError: (text: string) => void;
-  }): Promise<void> {
-    try {
-      // Implementation
-      const result = { success: true, param: context.parameters.param };
-      context.pushResult(JSON.stringify(result, null, 2));
-    } catch (error) {
-      context.pushError(`Error: ${error instanceof Error ? error.message : String(error)}`);
-    }
-  }
-}
-
-export function registerMyTools(source: any) {
-  source.registerTool(new MyTool());
-}
-```
-
-2. **Export from index.ts**:
-```typescript
-import { registerMyTools } from './mytools.js';
-
-export function registerAllTools(source: any) {
-  // ... existing
-  registerMyTools(source);
-}
-```
-
-3. **Recompile**: `npm run compile`
-4. **Test**: Reload extension and test with Bob
-
-### Tool Best Practices
-
-✅ **DO**:
-- Implement all required interface methods
-- Return structured JSON for all responses
-- Include status/error fields in responses
-- Handle edge cases (no session, no terminal, etc.)
-- Use descriptive parameter names and descriptions
-- Add JSDoc comments for complex logic
-- Use `pushResult` for success, `pushError` for errors
-
-❌ **DON'T**:
-- Return plain text strings (use JSON)
-- Assume resources exist (always check)
-- Throw exceptions (use `pushError` instead)
-- Skip any interface methods
-
-## Debugging Tips
-
-1. **Extension Logs**: Check Debug Console in Extension Development Host
-2. **Tool Logs**: Add `console.log()` in tool handlers
-3. **VSCode API**: Use `vscode.window.showInformationMessage()` for quick feedback
-4. **Breakpoints**: Set in extension code and debug with F5
-5. **DAP Events**: Log messages in `onDidSendMessage` tracker
-
-## Common Development Tasks
-
-### Adding VSCode Command
-
-1. Register in `package.json`:
-```json
-{
-  "command": "bob-powertoys.myCommand",
-  "title": "Bob PowerToys: My Command"
-}
-```
-
-2. Implement in `extension.ts`:
-```typescript
-context.subscriptions.push(
-  vscode.commands.registerCommand('bob-powertoys.myCommand', async () => {
-    // Implementation
-  })
-);
-```
-
-### Modifying Tool Behavior
-
-1. Find tool in `src/tools/`
-2. Modify `call()` method
-3. Recompile: `npm run compile`
-4. Reload extension: `Ctrl+R` in Extension Development Host
-
-## Building for Distribution
-
-### Create VSIX Package
-
-```bash
-npm install -g @vscode/vsce
-vsce package
-```
-
-Creates `.vsix` file for installation.
-
-### Publishing
-
-```bash
-vsce publish
-```
-
-Requires publisher account on VSCode Marketplace.
+---
 
 ## Troubleshooting
 
+### taskManager is null on startup
+`extractTaskManager` can return null if Bob's chat panel hasn't rendered yet when `setChatContent` is called. `registerTaskManager` automatically retries up to 3 times with 1s delays. If it still fails after 3 attempts, the status bar shows an error icon and breakpoint notifications are disabled - but all other tools still work.
+
 ### Extension doesn't activate
-- Check activation events in package.json
-- Verify compilation succeeds
-- Check Extension Host logs
+- Check that IBM Bob (`IBM.bob-code`) is installed and active
+- Check Output panel for `[Bob - PowerToys]` errors
 
 ### Tools don't appear in Bob
-- Verify Bob extension is active
-- Check that `registerSource` is called
-- Review extension activation logs
+- Verify `registerSource` didn't throw (check Dev Tools console)
+- Make sure `source.registerTool` was called for each tool
 
-### Tools don't work
-- Ensure debug session active (for debug tools)
-- Check parameter types match schema
-- Verify VSCode API permissions
+### Last task not restored
+- The save fires when `setCurrentTasks` is intercepted - you must open/switch to a task at least once per session for it to save
+- Check Dev Tools console for `setCurrentTasks intercepted` and `Saving last task` log lines
 
 ### TypeScript errors
-- Run `npm install`
-- Check tsconfig.json
-- Verify @types packages installed
+```bash
+npm run compile 2>&1
+```
 
-## Code Style Guidelines
+---
 
-- Use TypeScript strict mode
-- Implement all tool interface methods
-- Return structured JSON from all tools
-- Add JSDoc for public APIs
-- Keep functions focused and small
-- Use meaningful variable names
-- Handle errors gracefully with `pushError`
-- Follow existing patterns
-- Use centralized state from debugAdapter.ts
-- Parse JSON parameters with `parseJsonParameter()` utility
-- Validate frame IDs with `resolveFrameId()` utility
+## Building for Distribution
+
+```bash
+npm run compile
+npx vsce package
+# produces bob-powertoys-x.x.x.vsix
+```
+
+Install locally:
+```
+Extensions panel -> … -> Install from VSIX
+```
+
+---
 
 ## Resources
 
 - [VSCode Extension API](https://code.visualstudio.com/api)
-- [VSCode Debug API](https://code.visualstudio.com/api/references/vscode-api#debug)
-- [VSCode Terminal API](https://code.visualstudio.com/api/references/vscode-api#window.onDidStartTerminalShellExecution)
 - [Debug Adapter Protocol](https://microsoft.github.io/debug-adapter-protocol/)
+- [VSCode Extension Samples](https://github.com/microsoft/vscode-extension-samples)
 
 ## License
 

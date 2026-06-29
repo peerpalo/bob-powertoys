@@ -11,12 +11,12 @@ export class UniverseAnswerTool {
         return UniverseAnswerTool.id;
     }
 
-    // Full description — used by the newer definition-builder path
+    // Full description - used by the newer definition-builder path
     getDescription(_env?: any): string {
         return 'Returns the answer to life, the universe, and everything. A simple easter-egg tool that always returns 42.';
     }
 
-    // Short description — used by the toolToOpenAi path
+    // Short description - used by the toolToOpenAi path
     getCostEffectiveDescription(): string {
         return 'Returns the answer to life, the universe, and everything (42)';
     }

@@ -49,10 +49,10 @@ export class SetBreakpointsTool {
     { name: 'breakpoints', required: true, type: 'array', detail: 'Array of breakpoint objects with file, line, and optional condition', description: 'Array of breakpoint objects with file, line, and optional condition', usage: '[{"file": "src/app.ts", "line": 42, "condition": "x > 10"}]' },
   ];
 
-  // Property — read by toolToOpenAi(e).parameters
+  // Property - read by toolToOpenAi(e).parameters
   parameters = SetBreakpointsTool.PARAMS;
 
-  // Method — read by the newer getParameters(env) paths
+  // Method - read by the newer getParameters(env) paths
   getParameters(_env?: any): any[] {
     return SetBreakpointsTool.PARAMS;
   }
@@ -133,7 +133,7 @@ export class SetBreakpointsTool {
         status: verified ? 'success' : 'warning',
         message: verified
           ? `Set${bp.condition ? ` with condition: ${bp.condition}` : ''}`
-          : 'Set but not verified — file may not exist',
+          : 'Set but not verified - file may not exist',
       });
     }
 
@@ -164,10 +164,10 @@ export class RemoveBreakpointsTool {
     { name: 'breakpoints', required: true, type: 'array', detail: 'Array of breakpoint objects with file and line to remove', description: 'Array of breakpoint objects with file and line to remove', usage: '[{"file": "src/app.ts", "line": 42}]' },
   ];
 
-  // Property — read by toolToOpenAi(e).parameters
+  // Property - read by toolToOpenAi(e).parameters
   parameters = RemoveBreakpointsTool.PARAMS;
 
-  // Method — read by the newer getParameters(env) paths
+  // Method - read by the newer getParameters(env) paths
   getParameters(_env?: any): any[] {
     return RemoveBreakpointsTool.PARAMS;
   }
@@ -245,10 +245,10 @@ export class ListBreakpointsTool {
   // Shared param definition
   private static readonly PARAMS: any[] = [];
 
-  // Property — read by toolToOpenAi(e).parameters
+  // Property - read by toolToOpenAi(e).parameters
   parameters = ListBreakpointsTool.PARAMS;
 
-  // Method — read by the newer getParameters(env) paths
+  // Method - read by the newer getParameters(env) paths
   getParameters(_env?: any): any[] {
     return ListBreakpointsTool.PARAMS;
   }
