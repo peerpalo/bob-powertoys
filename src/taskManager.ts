@@ -1,8 +1,17 @@
 import * as vscode from 'vscode';
 import { getTaskManager } from './tools/utils.js';
 
-const LAST_SIDEBAR_TASK_ID_KEY = 'bob-powertoys.lastSidebarTaskId';
-const TABS_TASK_IDS_KEY = 'bob-powertoys.tabsTaskIds';
+// Keys are suffixed with the workspace folder path so tasks from different
+// workspaces never bleed into each other.
+function workspaceKey(): string {
+  const folders = vscode.workspace.workspaceFolders;
+  // Use the first folder's fsPath, or a sentinel for untitled/no-workspace sessions.
+  return folders?.[0]?.uri.fsPath ?? '__no_workspace__';
+}
+
+function sidebarKey(): string  { return `bob-powertoys.lastSidebarTaskId:${workspaceKey()}`; }
+function tabsKey(): string     { return `bob-powertoys.tabsTaskIds:${workspaceKey()}`; }
+
 const HAS_LAST_SIDEBAR_TASK_CTX = 'bob-powertoys.hasLastSidebarTask';
 
 interface TabEntry { taskId: string; viewColumn: number; }
@@ -179,7 +188,7 @@ export async function restoreTasks(context: vscode.ExtensionContext): Promise<vo
   const taskManager = getTaskManager();
 
   // ── Sidebar ───────────────────────────────────────────────────────────────
-  const lastTaskId = context.globalState.get<string>(LAST_SIDEBAR_TASK_ID_KEY);
+  const lastTaskId = context.globalState.get<string>(sidebarKey());
   if (lastTaskId) {
     lastSidebarTaskId = lastTaskId;
     vscode.commands.executeCommand('setContext', HAS_LAST_SIDEBAR_TASK_CTX, true);
@@ -190,7 +199,7 @@ export async function restoreTasks(context: vscode.ExtensionContext): Promise<vo
       console.warn(`[Bob - PowerToys] Could not restore sidebar task ${lastTaskId}: it may have been deleted`);
       lastSidebarTaskId = undefined;
       vscode.commands.executeCommand('setContext', HAS_LAST_SIDEBAR_TASK_CTX, false);
-      await context.globalState.update(LAST_SIDEBAR_TASK_ID_KEY, undefined);
+      await context.globalState.update(sidebarKey(), undefined);
     }
   }
 
@@ -199,7 +208,7 @@ export async function restoreTasks(context: vscode.ExtensionContext): Promise<vo
   // We only restore the bucket matching THIS window's key - other windows
   // will restore their own buckets when their extension hosts start up.
   const currentKey = windowKey();
-  const all = context.globalState.get<TabsStore>(TABS_TASK_IDS_KEY) ?? {};
+  const all = context.globalState.get<TabsStore>(tabsKey()) ?? {};
   const entries = all[currentKey] ?? [];
 
   if (entries.length === 0 && !lastTaskId) {
@@ -226,7 +235,7 @@ export async function restoreTasks(context: vscode.ExtensionContext): Promise<vo
   if (surviving.length !== entries.length) {
     const updated: TabsStore = { ...all, [currentKey]: surviving };
     if (surviving.length === 0) { delete updated[currentKey]; }
-    await context.globalState.update(TABS_TASK_IDS_KEY, Object.keys(updated).length > 0 ? updated : undefined);
+    await context.globalState.update(tabsKey(), Object.keys(updated).length > 0 ? updated : undefined);
   }
 }
 
@@ -245,7 +254,7 @@ async function saveTasks(context: vscode.ExtensionContext, chatManager: any, isP
 
     console.log(`[Bob - PowerToys] Saving last sidebar task: ${lastSidebarTaskId}`);
     vscode.commands.executeCommand('setContext', HAS_LAST_SIDEBAR_TASK_CTX, !!lastSidebarTaskId);
-    await context.globalState.update(LAST_SIDEBAR_TASK_ID_KEY, lastSidebarTaskId);
+    await context.globalState.update(sidebarKey(), lastSidebarTaskId);
   } else {
     // ── Tab ──────────────────────────────────────────────────────────────────
     const taskId = chatManager?.getTaskId?.();
@@ -256,7 +265,7 @@ async function saveTasks(context: vscode.ExtensionContext, chatManager: any, isP
     const viewColumn: number = panel?.viewColumn ?? vscode.ViewColumn.One;
 
     const wsKey = windowKey();
-    const all = context.globalState.get<TabsStore>(TABS_TASK_IDS_KEY) ?? {};
+    const all = context.globalState.get<TabsStore>(tabsKey()) ?? {};
     const current = all[wsKey] ?? [];
 
     // Update entry if already tracked (viewColumn may have changed), otherwise add.
@@ -267,16 +276,16 @@ async function saveTasks(context: vscode.ExtensionContext, chatManager: any, isP
       : [...current, entry];
 
     console.log(`[Bob - PowerToys] Saving tab task: ${taskId} col:${viewColumn} (window: ${wsKey}, total: ${updated.length})`);
-    await context.globalState.update(TABS_TASK_IDS_KEY, { ...all, [wsKey]: updated });
+    await context.globalState.update(tabsKey(), { ...all, [wsKey]: updated });
   }
 }
 
 /**
- * Remove a task id from TABS_TASK_IDS_KEY when its tab is closed.
+ * Remove a task id from the tabs store when its tab is closed.
  */
 async function removeTabTask(context: vscode.ExtensionContext, taskId: string): Promise<void> {
   const wsKey = windowKey();
-  const all = context.globalState.get<TabsStore>(TABS_TASK_IDS_KEY) ?? {};
+  const all = context.globalState.get<TabsStore>(tabsKey()) ?? {};
   const current = all[wsKey] ?? [];
   const filtered = current.filter(e => e.taskId !== taskId);
   if (filtered.length === current.length) { return; }
@@ -284,5 +293,5 @@ async function removeTabTask(context: vscode.ExtensionContext, taskId: string): 
   console.log(`[Bob - PowerToys] Removing tab task: ${taskId} (window: ${wsKey}, remaining: ${filtered.length})`);
   const updated: TabsStore = { ...all, [wsKey]: filtered };
   if (filtered.length === 0) { delete updated[wsKey]; }
-  await context.globalState.update(TABS_TASK_IDS_KEY, Object.keys(updated).length > 0 ? updated : undefined);
+  await context.globalState.update(tabsKey(), Object.keys(updated).length > 0 ? updated : undefined);
 }
