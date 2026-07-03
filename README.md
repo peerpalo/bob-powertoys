@@ -1,6 +1,6 @@
 # IBM Bob - PowerToys
 
-Native debugging and terminal tools for [IBM Bob AI Assistant](https://bob.ibm.com/).
+Power tools for [IBM Bob AI Assistant](https://bob.ibm.com/): debugging, terminal access, multi-root workspace support, and quality-of-life improvements.
 
 ## What is IBM Bob - PowerToys?
 
@@ -119,17 +119,6 @@ The tools are **automatically hidden** in single-root workspaces — they consum
 
 Bob has access to 29 tools organized in 6 categories:
 
-### Multi-Root Workspace (6 tools)
-
-> These tools are **only active in multi-root workspaces** (2+ root folders). They are invisible to the Bob in single-root workspaces.
-
-- `list_workspace_folders` - List all workspace root folders and their paths
-- `read_workspace_file` - Read any file from any workspace folder
-- `write_workspace_file` - Write/create any file in any workspace folder
-- `list_workspace_files` - List files and directories in any workspace folder
-- `search_workspace_files` - Find files by glob pattern across workspace folders
-- `grep_workspace` - Search file contents by regex across workspace folders
-
 ### Breakpoint Management (3 tools)
 - `set_breakpoints` - Set multiple breakpoints with optional conditions
 - `remove_breakpoints` - Remove multiple breakpoints
@@ -161,6 +150,17 @@ Bob has access to 29 tools organized in 6 categories:
 - `get_terminal_output` - Get recent terminal output
 - `search_terminal_output` - Search terminal with regex
 - `focus_terminal` - Bring terminal into focus
+
+### Multi-Root Workspace (6 tools)
+
+> These tools are **only active in multi-root workspaces** (2+ root folders). They are invisible to the Bob in single-root workspaces.
+
+- `list_workspace_folders` - List all workspace root folders and their paths
+- `read_workspace_file` - Read any file from any workspace folder
+- `write_workspace_file` - Write/create any file in any workspace folder
+- `list_workspace_files` - List files and directories in any workspace folder
+- `search_workspace_files` - Find files by glob pattern across workspace folders
+- `grep_workspace` - Search file contents by regex across workspace folders
 
 For detailed tool documentation and parameters, see [DEVELOPMENT.md](DEVELOPMENT.md).
 
