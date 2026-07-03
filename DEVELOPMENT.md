@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-IBM Bob - PowerToys is an IBM Bob extension (extension ID `IBM.bob-code`) that enhances the assistant with direct access to your debugging sessions and terminal output. It also adds quality-of-life improvements: detaching the chat panel to a separate OS window, and automatically restoring the last active task when you reopen the application. Bob can set breakpoints, inspect variables, control execution, and read terminal output: all without manual copy-pasting.
+IBM Bob - PowerToys is an IBM Bob extension that enhances the assistant with direct access to your debugging sessions and terminal output. It also adds quality-of-life improvements: detaching the chat panel to a separate OS window, and automatically restoring the last active task when you reopen the application. Bob can set breakpoints, inspect variables, control execution, and read terminal output: all without manual copy-pasting.
 
 ## Project Structure
 
@@ -12,8 +12,9 @@ bob-powertoys/
 │   ├── extension.ts              # Extension entry point and lifecycle
 │   ├── taskManager.ts            # Task commands, last-task persistence
 │   ├── debugAdapter.ts           # Centralized debug adapter tracker
-│   └── tools/                   # Individual tool modules
-│       ├── utils.ts              # Shared utilities: taskManager access, frame resolution
+│   ├── utils.ts                  # Shared utilities: taskManager access, frame resolution
+│   └── tools/                    # Individual tool modules
+│       ├── workspace.ts          # Multi-root workspace tools (6 tools + prompt injection)
 │       ├── breakpoints.ts        # Breakpoint management (batch operations)
 │       ├── debugControl.ts       # Debug stepping & control
 │       ├── debugConsole.ts       # Debug console & variable inspection
@@ -37,39 +38,50 @@ bob-powertoys/
 ### High-Level Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                Bob Extension: Bob PowerToys                     │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                 │
-│  ┌──────────────────┐         ┌────────────────────────────┐    │
-│  │  Bob Public API  │         │  Centralized Debug Adapter │    │
-│  │  registerSource  │         │  - Output capture          │    │
-│  │                  │         │  - State tracking          │    │
-│  │  Tool Registry   │◄────────┤  - Breakpoint notifications│    │
-│  └────────┬─────────┘         └────────────────────────────┘    │
-│           │                              ▲                      │
-│           │                              │                      │
-│           │                    ┌─────────┴──────────┐           │
-│           │                    │  VSCode APIs       │           │
-│           │                    │  - Debug API (DAP) │           │
-│           │                    │  - Terminal API    │           │
-│           │                    │  - Workspace API   │           │
-│           │                    └────────────────────┘           │
-│                                                                 │
-│  ┌──────────────────────────────────────────────────────────┐   │
-│  │  Bob Internal Hack (taskManager extraction)              │   │
-│  │  - extractTaskManager via Array.prototype.find patch     │   │
-│  │  - enables: openTaskInWindow, last-task persistence      │   │
-│  └──────────────────────────────────────────────────────────┘   │
-└───────────┬─────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│                Bob Extension: Bob PowerToys                      │
+├──────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  ┌──────────────────┐         ┌──────────────────────────────┐   │
+│  │  Bob Public API  │         │  Centralized Debug Adapter   │   │
+│  │  registerSource  │         │  - Output capture            │   │
+│  │                  │         │  - State tracking            │   │
+│  │  Tool Registry   │◄────────┤  - Breakpoint notifications  │   │
+│  └────────┬─────────┘         └──────────────────────────────┘   │
+│           │                              ▲                       │
+│           │                              │                       │
+│           │                    ┌─────────┴───────────┐           │
+│           │                    │  VSCode APIs        │           │
+│           │                    │  - Debug API (DAP)  │           │
+│           │                    │  - Terminal API     │           │
+│           │                    │  - Workspace API    │           │
+│           │                    └─────────────────────┘           │
+│           ▼                                                      │
+│  ┌───────────────────────────────────────────────────────────┐   │
+│  │  Bob Internal Hack (taskManager extraction)               │   │
+│  │  - extractTaskManager via Array.prototype.find patch      │   │
+│  │  - enables: openTaskInWindow, last-task persistence       │   │
+│  └───────────────────────────────────────────────────────────┘   │
+└───────────┬──────────────────────────────────────────────────────┘
             │ Bob's Native Tool Interface
             │ Direct integration via registerSource
             │ + Automatic breakpoint notifications
-            │
-   ┌────────▼────────┐
-   │  Bob Assistant  │
-   │  (AI Assistant) │
-   └─────────────────┘
+            ▼
+   ┌──────────────────┐
+   │  Bob Assistant   │
+   │  (AI Assistant)  │
+   └──────────────────┘
+```
+
+### Host Extension
+
+IBM Bob is a fork of VS Code. The Bob application ships a built-in extension with the VS Code extension ID **`IBM.bob-code`** — this is the extension that PowerToys activates against. It is always present in any Bob installation; there is nothing to install separately.
+
+PowerToys declares `"extensionDependencies": ["IBM.bob-code"]` in `package.json`, which guarantees Bob is fully activated before our `activate()` runs, and gives us access to `bobExtension.exports` via:
+
+```typescript
+const bobExtension = vscode.extensions.getExtension('IBM.bob-code');
+const bobExports = await bobExtension.activate();
 ```
 
 ### Extension Lifecycle
@@ -88,7 +100,7 @@ registerPowerToys(context, bobExports)
     ├── registerLastTaskSave()                   // wrap webview to intercept setCurrentTasks
     ├── registerDebugAdapterTracker(bobExports)  // DAP event tracking + notifications
     ├── bobExports.registerSource(...)           // register tool source
-    └── register 23 tools
+    └── register 29 tools
     ↓
 Commands registered (independent of Bob):
     ├── bob-powertoys.showStatus
@@ -199,7 +211,7 @@ The patch lives for a single synchronous call and is removed in a `finally` bloc
 **Returns `null` if no chat managers exist yet** (Bob panel not yet rendered). `registerTaskManager` retries up to 3 times with a 1-second delay to handle this race.
 
 ```typescript
-// src/tools/utils.ts
+// src/utils.ts
 export async function registerTaskManager(bobExports: any): Promise<void> {
   for (let attempt = 1; attempt <= 3; attempt++) {
     const tm = bobExports?.taskManager ?? extractTaskManager(bobExports);
@@ -213,6 +225,86 @@ export function getTaskManager(): any {
   return _cachedTaskManager;
 }
 ```
+
+---
+
+## System Prompt Injection Hack
+
+Bob builds a new system message on **every turn**. There is no public API for appending to it — but we can mutate the message object directly once it exists.
+
+### Why it's needed
+
+`source.onTurnStart` is the earliest hook we have. However, the call sequence is:
+
+```
+xi.Instance.onTurnStart(taskId, envs, isEmpty)   ← our callback fires HERE
+  └─► l.submitTurn(...)
+        └─► ZJo(t, ...)
+              └─► t.newMessage({ appendSystem: ..., ... })  ← system message built HERE
+```
+
+When `onTurnStart` fires, `messages[0]` with `role === "system"` **does not yet exist**. Any attempt to append to it synchronously is a no-op (the object hasn't been created).
+
+### The polling fix
+
+After `onTurnStart` fires we schedule a micro-task (`setTimeout(tryInject, 0)`) that polls until the system message appears, then mutates its `content` string in-place:
+
+```typescript
+// src/tools/workspace.ts — registerWorkspacePromptInjection()
+source.onTurnStart((taskId: string, _envs: any, isEmpty: boolean) => {
+  if (!isEmpty || folders.length < 2) { return; }   // only on new turns in multi-root workspaces
+
+  const injection = buildInjection(folders);
+
+  const MAX_POLLS = 50;   // ~500 ms total
+  const POLL_MS   = 10;
+  let   attempts  = 0;
+
+  function tryInject() {
+    const tm = getTaskManager();                    // cached, never null after activation
+    const cm = findTaskChatManager(tm, taskId);     // active or backgrounded chatManager
+    const messages = cm?.currentTask?.getMessages?.();
+    const systemMessage = messages?.[0];
+
+    if (!systemMessage || systemMessage.role !== 'system') {
+      if (++attempts < MAX_POLLS) { setTimeout(tryInject, POLL_MS); }
+      return;                                       // not ready yet — retry
+    }
+
+    systemMessage.content += injection;             // mutate in-place ✓
+  }
+
+  setTimeout(tryInject, 0);
+});
+```
+
+### Key internal objects accessed
+
+| Expression | What it is |
+|---|---|
+| `getTaskManager()` | Cached `_4` / N0 singleton from the extraction hack |
+| `cm.currentTask` | The active `Task` object inside the chatManager |
+| `cm.currentTask.getMessages()` | Returns the ordered message array for the current turn |
+| `messages[0]` | System message — always first; `role === "system"` when present |
+| `systemMessage.content` | Mutable string — append our block here |
+
+### Conditions checked before injecting
+
+| Condition | Reason |
+|---|---|
+| `isEmpty === true` | `onTurnStart` fires on every turn, including resume turns on an already-started task. `isEmpty` is `true` only when the task has **no prior messages** — i.e. the very first user message in a brand-new task. That's the only turn where the system message is freshly built and our injection needs to be added. |
+| `folders.length >= 2` | Injection is only meaningful in multi-root workspaces |
+| `systemMessage.role === 'system'` | Guard against `messages` existing but not yet having a system entry |
+
+### What was tried and why the alternatives failed
+
+| Approach | Problem |
+|---|---|
+| Append synchronously in `onTurnStart` | System message doesn't exist yet at that point |
+| `appendSystem` option on `newMessage` | Internal to Bob's UI layer — not accessible from `registerSource` callbacks |
+| `source.onTurnEnd` + prepend | Turn is already finished; LLM never sees the update |
+| Long `setTimeout` (e.g. 200 ms) | Brittle — slow machines may miss it; fast machines waste time |
+| **Poll with `setTimeout(0)` × 50** | **Works — system message typically appears within 1–3 polls (~10–30 ms)** |
 
 ---
 
@@ -397,7 +489,7 @@ Controls when Bob is automatically notified about breakpoint hits.
 
 **Key functions**:
 - `activate(context)` - entry point; registers status bar, waits for Bob, calls `registerTaskCommands`
-- `registerPowerToys(context, bobExports)` - awaits `registerTaskManager`, then `registerTaskPersistence` + `restoreTasks`, then registers debug tracker and all 23 tools
+- `registerPowerToys(context, bobExports)` - awaits `registerTaskManager`, then `registerTaskPersistence` + `restoreTasks`, then registers debug tracker and all 29 tools
 - `showStatus()` / `showStatusBarError()` - status bar management
 
 ### 2. taskManager.ts
@@ -448,7 +540,7 @@ flushPendingNotifications(): Promise<void>
 - `findTaskChatManager(taskManager, taskId)` does escalating lookup: active -> backgrounded
 - `safeNotify(chatManager, taskId, message)` injects the message into the correct task
 
-### 4. tools/utils.ts
+### 4. utils.ts
 
 **Purpose**: Shared utilities - taskManager lifecycle, chat manager lookup, frame resolution.
 
@@ -483,17 +575,18 @@ class MyTool {
 
 | File | Tools | Count |
 |---|---|---|
+| `workspace.ts` | `list_workspace_folders`, `read_workspace_file`, `write_workspace_file`, `list_workspace_files`, `search_workspace_files`, `grep_workspace` | 6 |
 | `breakpoints.ts` | `set_breakpoints`, `remove_breakpoints`, `list_breakpoints` | 3 |
 | `debugControl.ts` | `step_over`, `step_into`, `step_out`, `continue_execution`, `pause_execution` | 5 |
 | `debugConsole.ts` | `evaluate_expression`, `get_variables`, `get_stack_trace`, `get_scopes`, `set_variable`, `get_debug_output` | 6 |
 | `debugSession.ts` | `get_active_debug_session`, `list_debug_configurations`, `start_debug_session`, `stop_debug_session` | 4 |
 | `terminalConsole.ts` | `list_terminals`, `get_terminal_output`, `search_terminal_output`, `focus_terminal` | 4 |
 | `universeAnswer.ts` | `answer_to_life_universe_and_everything` | 1 |
-| **Total** | | **23** |
+| **Total** | | **29** |
 
 ---
 
-## Complete Tool Reference (23 Tools)
+## Complete Tool Reference (29 Tools)
 
 ### Breakpoint Tools (3)
 | Tool | Description |
@@ -536,6 +629,22 @@ class MyTool {
 | `get_terminal_output` | Get recent output from a terminal |
 | `search_terminal_output` | Search terminal output for a pattern |
 | `focus_terminal` | Focus a specific terminal |
+
+### Multi-Root Workspace Tools (6)
+
+> **Visibility**: These tools are only active in multi-root VS Code workspaces (2+ root folders).
+> They are completely hidden from the LLM in single-root workspaces via the `enabled()` method.
+
+| Tool | Description |
+|---|---|
+| `list_workspace_folders` | List all root folders — call this first to discover folder names |
+| `read_workspace_file` | Read a file in any workspace folder (replaces `read_file` for non-primary folders) |
+| `write_workspace_file` | Write/create a file in any workspace folder (replaces `write_file` for non-primary folders) |
+| `list_workspace_files` | Browse a directory in any workspace folder (replaces `list_files`) |
+| `search_workspace_files` | Find files by glob pattern in any workspace folder (replaces `glob`) |
+| `grep_workspace` | Search file contents by regex in any workspace folder (replaces `grep`) |
+
+All six tools accept a `workspace` parameter (the folder `name` from `list_workspace_folders`) and a `path` relative to that folder root.  `search_workspace_files` and `grep_workspace` also accept an optional `workspace` param — omit it to search all folders at once.
 
 ### Easter Egg (1)
 | Tool | Description |
@@ -585,7 +694,7 @@ npm run watch            # watch mode
 [Bob - PowerToys] setCurrentTasks intercepted, tasks: 1
 [Bob - PowerToys] Saving last task: <taskId>
 [Bob - PowerToys] Restoring last task: <taskId>
-[Bob - PowerToys] Successfully registered 23 tools with Bob
+[Bob - PowerToys] Successfully registered 29 tools with Bob
 ```
 
 ---
@@ -599,48 +708,50 @@ npm run watch            # watch mode
 ```typescript
 class MyNewTool {
   static id = 'my_new_tool';
-  groups = ['read'];
+  groups = ['read']; // or ['edit']
+  permission = 'read'; // or 'edit'
   parameters = [
     {
       name: 'param1',
       required: true,
       type: 'string',
       description: 'What this parameter does',
+      detail: 'Short hint shown in the UI',
       usage: 'example value'
     }
   ];
 
   getId(): string { return MyNewTool.id; }
 
-  getDescription(): string {
-    return `## my_new_tool
-Description: What this tool does
+  // Optional — return false to hide tool from LLM entirely (e.g. wrong workspace type)
+  enabled(_env?: any): boolean { return true; }
 
-Parameters:
-- param1: (required) string. What this parameter does
-
-Usage:
-<my_new_tool>
-<param1>example value</param1>
-</my_new_tool>`;
+  getDescription(_env?: any): string {
+    return 'Full description shown in the system prompt. Be specific about when to use this tool.';
   }
 
   getCostEffectiveDescription(): string {
     return 'Brief one-liner for tool selection';
   }
 
-  toolUseDescription(params: any): string {
-    return `Running my_new_tool with ${params.param1}`;
+  getLabels(args: Record<string, any>) {
+    return {
+      displayName: `My Tool: ${args.param1}`,
+      running: `Running with ${args.param1}...`,
+      success: `Done: ${args.param1}`,
+      error: `Failed: ${args.param1}`,
+    };
   }
 
   async call(context: {
+    env: any;
     parameters: Record<string, any>;
     pushResult: (text: string) => void;
     pushError: (text: string) => void;
   }): Promise<void> {
     const { param1 } = context.parameters;
     // implementation
-    context.pushResult(`Done: ${param1}`);
+    context.pushResult(JSON.stringify({ result: param1 }, null, 2));
   }
 }
 ```
@@ -651,6 +762,19 @@ source.registerTool(new MyNewTool());
 ```
 
 3. **Update the count** in `extension.ts` and in this document.
+
+### Conditionally visible tools (`enabled()`)
+
+Use `enabled()` to completely hide a tool from the LLM when it's not applicable:
+
+```typescript
+// Only show in multi-root workspaces
+enabled(_env?: any): boolean {
+  return (vscode.workspace.workspaceFolders?.length ?? 0) > 1;
+}
+```
+
+Bob evaluates `enabled?.(env) ?? true` at tool-list build time. A tool returning `false` is excluded from the LLM's context entirely — it consumes no tokens and cannot be called.
 
 ---
 
@@ -688,7 +812,7 @@ npx vsce package
 
 Install locally:
 ```
-Extensions panel -> … -> Install from VSIX
+Extensions panel -> ... -> Install from VSIX
 ```
 
 ---

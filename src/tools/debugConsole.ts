@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { resolveFrameId } from './utils.js';
+import { resolveFrameId } from '../utils.js';
 import { getCurrentStoppedState } from '../debugAdapter.js';
 
 // Store debug output from DAP

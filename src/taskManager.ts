@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { getTaskManager } from './tools/utils.js';
+import { getTaskManager } from './utils.js';
 
 // Keys are suffixed with the workspace folder path so tasks from different
 // workspaces never bleed into each other.
