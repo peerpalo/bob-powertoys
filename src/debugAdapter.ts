@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import { getBreakpointOwner } from './tools/breakpoints.js';
-import { getTaskManager, findTaskChatManager } from './tools/utils.js';
+import { getTaskManager, findTaskChatManager } from './utils.js';
 
 /**
  * Shared debug adapter state and tracking

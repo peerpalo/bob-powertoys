@@ -6,7 +6,8 @@
       "type": "extensionHost",
       "request": "launch",
       "args": [
-        "--extensionDevelopmentPath=${workspaceFolder}"
+        "--extensionDevelopmentPath=${workspaceFolder}",
+        "--disable-extension=peerpalo.bob-powertoys"
       ],
       "outFiles": [
         "${workspaceFolder}/out/**/*.js"

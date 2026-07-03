@@ -5,8 +5,9 @@ import { registerTerminalCapture, registerTerminalConsoleTools } from './tools/t
 import { registerBreakpointTools } from './tools/breakpoints.js';
 import { registerDebugControlTools } from './tools/debugControl.js';
 import { registerUniverseAnswerTool } from './tools/universeAnswer.js';
+import { registerWorkspaceTools } from './tools/workspace.js';
 import { registerDebugAdapterTracker } from './debugAdapter.js';
-import { registerTaskManager } from './tools/utils.js';
+import { registerTaskManager } from './utils.js';
 import { registerTaskCommands, registerTaskPersistence, restoreTasks } from './taskManager.js';
 
 const BOB_EXTENSION_ID = 'IBM.bob-code';
@@ -89,8 +90,9 @@ async function registerPowerToys(context: vscode.ExtensionContext, bobExports: a
     registerDebugSessionTools(source);         // 4 tools
     registerTerminalConsoleTools(source);      // 4 tools
     registerUniverseAnswerTool(source);        // 1 tool
+    registerWorkspaceTools(source);            // 6 tools
 
-    console.log('[Bob - PowerToys] Successfully registered 23 tools with Bob');
+    console.log('[Bob - PowerToys] Successfully registered 29 tools with Bob');
     console.log('[Bob - PowerToys] Automatic breakpoint notifications enabled');
 
     if (statusBarItem) {
@@ -114,7 +116,7 @@ function showStatus() {
 
   const status = [
     'IBM Bob - PowerToys:',
-    '- Total Tools Registered: 23',
+    '- Total Tools Registered: 29',
     '- Automatic Breakpoint Notifications: Enabled',
     '- Active Debug Session: ' + sessionName,
     '- Breakpoints: ' + vscode.debug.breakpoints.length,

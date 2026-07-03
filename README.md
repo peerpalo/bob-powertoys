@@ -4,7 +4,7 @@ Native debugging and terminal tools for [IBM Bob AI Assistant](https://bob.ibm.c
 
 ## What is IBM Bob - PowerToys?
 
-IBM Bob - PowerToys is an IBM Bob extension (extension ID `IBM.bob-code`) that enhances the assistant with direct access to your debugging sessions and terminal output. It also adds quality-of-life improvements: detaching the chat panel to a separate OS window, and automatically restoring the last active task when you reopen the application. Bob can set breakpoints, inspect variables, control execution, and read terminal output: all without manual copy-pasting.
+IBM Bob - PowerToys is an IBM Bob extension that enhances the assistant with direct access to your debugging sessions and terminal output. It also adds quality-of-life improvements: detaching the chat panel to a separate OS window, and automatically restoring the last active task when you reopen the application. Bob can set breakpoints, inspect variables, control execution, and read terminal output: all without manual copy-pasting.
 
 ## Features
 
@@ -14,6 +14,7 @@ IBM Bob - PowerToys is an IBM Bob extension (extension ID `IBM.bob-code`) that e
 - **Stack Traces**: Get call stacks and navigate frames
 - **Terminal Access**: Read and search terminal output
 - **Automatic Notifications**: Bob is notified when breakpoints are hit
+- **Multi-Root Workspace Support**: Read, write, and search files across all workspace folders without per-file confirmation prompts
 - **Open Task in New Window**: Detach Bob's chat panel to a separate OS window so you can move it to another monitor
 - **Restore Last Task**: Bob automatically reopens the task you were working on when you restart the application
 
@@ -97,9 +98,37 @@ When you close and reopen the application, Bob automatically reopens the task yo
 
 This works silently in the background: the save happens as you use Bob normally, and the restore happens at startup before you even interact with it.
 
+## Multi-Root Workspace Support
+
+When you open a Bob workspace with **multiple root folders at different paths on disk** (e.g. `...\src\frontend` and `...\src\backend` in the same `.code-workspace` file), Bob's built-in tools (`read_file`, `list_files`, `glob`, `grep`) are sandboxed to only the primary folder. Every file in a secondary folder triggers a "allow outside workspace?" confirmation prompt.
+
+Bob PowerToys solves this by providing six workspace-aware tools that use the VS Code filesystem API directly, with no sandbox restrictions:
+
+| Tool | Replaces |
+|---|---|
+| `list_workspace_folders` | *(discovery — call this first)* |
+| `read_workspace_file` | `read_file` |
+| `write_workspace_file` | `write_file` |
+| `list_workspace_files` | `list_files` |
+| `search_workspace_files` | `glob` |
+| `grep_workspace` | `grep` |
+
+The tools are **automatically hidden** in single-root workspaces — they consume no tokens and cannot be called when there is only one folder.
+
 ## Available Tools
 
-Bob has access to 23 tools organized in 5 categories:
+Bob has access to 29 tools organized in 6 categories:
+
+### Multi-Root Workspace (6 tools)
+
+> These tools are **only active in multi-root workspaces** (2+ root folders). They are invisible to the Bob in single-root workspaces.
+
+- `list_workspace_folders` - List all workspace root folders and their paths
+- `read_workspace_file` - Read any file from any workspace folder
+- `write_workspace_file` - Write/create any file in any workspace folder
+- `list_workspace_files` - List files and directories in any workspace folder
+- `search_workspace_files` - Find files by glob pattern across workspace folders
+- `grep_workspace` - Search file contents by regex across workspace folders
 
 ### Breakpoint Management (3 tools)
 - `set_breakpoints` - Set multiple breakpoints with optional conditions
