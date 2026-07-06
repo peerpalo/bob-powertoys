@@ -102,18 +102,7 @@ This works silently in the background: the save happens as you use Bob normally,
 
 When you open a Bob workspace with **multiple root folders at different paths on disk** (e.g. `...\src\frontend` and `...\src\backend` in the same `.code-workspace` file), Bob's built-in tools (`read_file`, `list_files`, `glob`, `grep`) are sandboxed to only the primary folder. Every file in a secondary folder triggers a "allow outside workspace?" confirmation prompt.
 
-Bob PowerToys solves this by providing six workspace-aware tools that use the VS Code filesystem API directly, with no sandbox restrictions:
-
-| Tool | Replaces |
-|---|---|
-| `list_workspace_folders` | *(discovery — call this first)* |
-| `read_workspace_file` | `read_file` |
-| `write_workspace_file` | `write_file` |
-| `list_workspace_files` | `list_files` |
-| `search_workspace_files` | `glob` |
-| `grep_workspace` | `grep` |
-
-The tools are **automatically hidden** in single-root workspaces — they consume no tokens and cannot be called when there is only one folder.
+Bob PowerToys solves this by providing six workspace-aware tools that use the VS Code filesystem API directly, with no sandbox restrictions. The tools are **automatically hidden** in single-root workspaces - they consume no tokens and cannot be called when there is only one folder.
 
 ## Available Tools
 
@@ -159,7 +148,7 @@ Bob has access to 29 tools organized in 6 categories:
 - `read_workspace_file` - Read any file from any workspace folder
 - `write_workspace_file` - Write/create any file in any workspace folder
 - `list_workspace_files` - List files and directories in any workspace folder
-- `search_workspace_files` - Find files by glob pattern across workspace folders
+- `glob_workspace` - Find files by glob pattern across workspace folders
 - `grep_workspace` - Search file contents by regex across workspace folders
 
 For detailed tool documentation and parameters, see [DEVELOPMENT.md](DEVELOPMENT.md).
