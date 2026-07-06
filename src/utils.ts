@@ -2,6 +2,12 @@
  * Utility functions for Bob PowerToys tools
  */
 
+import * as vscode from 'vscode';
+import * as path from 'path';
+import * as cp from 'child_process';
+import * as readline from 'readline';
+import { access, stat } from 'fs/promises';
+
 // Cached taskManager instance - populated once by initTaskManager(), reused everywhere.
 let _cachedTaskManager: any = null;
 
@@ -87,6 +93,148 @@ export function findTaskChatManager(taskManager: any, taskId: string): any | nul
   if (chatManager) return chatManager;
 
   return null;
+}
+
+// ─── ripgrep binary resolution (mirrors Bob's own logic) ─────────────────────
+
+let _rgBinary: string | undefined;
+
+/**
+ * Field separator used with ripgrep's --field-match-separator flag.
+ * ASCII Unit Separator (0x1F) — matches Bob's GrepTool exactly, and is
+ * safe on macOS, Linux, and Windows since it never appears in file paths
+ * or source code.
+ */
+export const RG_FIELD_SEP = '\x1f';
+
+/**
+ * Resolves the ripgrep binary shipped with VS Code itself.
+ * Uses the same candidate list as Bob's own GrepTool. Result is cached.
+ */
+export async function resolveRipGrepBinary(): Promise<string | undefined> {
+  if (_rgBinary) { return _rgBinary; }
+  const exe = process.platform.startsWith('win') ? 'rg.exe' : 'rg';
+  const plat = `${process.platform}-${process.arch}`;
+  const appRoot = vscode.env.appRoot;
+  const candidates = [
+    path.join('node_modules/@vscode/ripgrep-universal/bin', plat, exe),
+    path.join('node_modules.asar.unpacked/@vscode/ripgrep-universal/bin', plat, exe),
+    path.join('node_modules/@vscode/ripgrep/bin', exe),
+    path.join('node_modules/vscode-ripgrep/bin', exe),
+    path.join('node_modules.asar.unpacked/vscode-ripgrep/bin', exe),
+    path.join('node_modules.asar.unpacked/@vscode/ripgrep/bin', exe),
+  ];
+  for (const rel of candidates) {
+    const full = path.join(appRoot, rel);
+    const found = await access(full).then(() => true, () => false);
+    if (found) { _rgBinary = full; return full; }
+  }
+  return undefined;
+}
+
+/**
+ * Spawns ripgrep with the given args and returns all stdout as a string.
+ * Kills the process after LINE_HARD_CAP lines to bound memory usage (mirrors Bob).
+ * Rejects if there is no output (i.e. no matches).
+ */
+export function spawnRipGrep(binary: string, args: string[], lineHardCap = 300): Promise<string> {
+  return new Promise((resolve, reject) => {
+    let proc: cp.ChildProcess;
+    try {
+      proc = cp.spawn(binary, args);
+    } catch (err) {
+      reject(err);
+      return;
+    }
+    const rl = readline.createInterface({ input: proc.stdout!, crlfDelay: Infinity });
+    let out = '';
+    let lineCount = 0;
+    rl.on('line', line => {
+      if (lineCount < lineHardCap) {
+        out += line + '\n';
+        lineCount++;
+      } else {
+        rl.close();
+        proc.kill();
+      }
+    });
+    let stderr = '';
+    proc.stderr!.on('data', d => { stderr += d.toString(); });
+    rl.on('close', () => {
+      out.trim() ? resolve(out) : reject(new Error(stderr || 'No matches'));
+    });
+    proc.on('error', err => reject(err));
+  });
+}
+
+/**
+ * stat() a list of paths in parallel and return a Map<path, mtimeMs>.
+ * Missing files are silently omitted.
+ */
+export async function statMtimes(paths: string[]): Promise<Map<string, number>> {
+  const map = new Map<string, number>();
+  await Promise.all(paths.map(p => stat(p).then(s => map.set(p, s.mtimeMs)).catch(() => {})));
+  return map;
+}
+
+/**
+ * Run ripgrep in --files mode (glob file search), collect paths sorted by mtime.
+ * Mirrors Bob's GlobTool.exec + formatOutput:
+ *   - hard cap at 2×maxResults lines before the process is killed
+ *   - stat() all collected paths in parallel, sort newest-first, slice to maxResults
+ * Returns the sorted absolute paths (may be fewer than maxResults if rg yields less).
+ * Rejects if rg produces no output.
+ */
+export async function ripGrepFiles(
+  binary: string,
+  args: string[],
+  maxResults: number
+): Promise<string[]> {
+  const hardCap = 2 * maxResults;
+  const collected: string[] = await new Promise((resolve, reject) => {
+    const proc = cp.spawn(binary, args);
+    const rl = readline.createInterface({ input: proc.stdout, crlfDelay: Infinity });
+    const lines: string[] = [];
+    rl.on('line', line => {
+      if (!line.trim()) { return; }
+      if (lines.length >= hardCap) { rl.close(); proc.kill(); return; }
+      lines.push(line);
+    });
+    let stderr = '';
+    proc.stderr.on('data', d => { stderr += d.toString(); });
+    rl.on('close', () => {
+      lines.length > 0 ? resolve(lines) : reject(new Error(stderr || 'No files found'));
+    });
+    proc.on('error', err => reject(err));
+  });
+
+  // stat in parallel, sort by mtime descending, slice to maxResults
+  const withMtime = await Promise.all(
+    collected.map(p => stat(p).then(s => ({ p, mtime: s.mtimeMs })).catch(() => ({ p, mtime: 0 })))
+  );
+  withMtime.sort((a, b) => b.mtime - a.mtime);
+  return withMtime.slice(0, maxResults).map(x => x.p);
+}
+
+/**
+ * Build --ignore-file args for ripgrep, mirroring Bob's buildIgnoreFileArgs.
+ * Adds .gitignore (when respectGitIgnore=true) and .bobignore from the workspace root.
+ * Each file that exists on disk is passed as "--ignore-file <path>".
+ */
+export async function buildIgnoreFileArgs(
+  workspaceRoot: string,
+  respectGitIgnore = true
+): Promise<string[]> {
+  const files: string[] = [];
+  if (respectGitIgnore) { files.push('.gitignore'); }
+  files.push('.bobignore');
+  const args: string[] = [];
+  for (const file of files) {
+    const full = path.join(workspaceRoot, file);
+    const found = await access(full).then(() => true, () => false);
+    if (found) { args.push('--ignore-file', full); }
+  }
+  return args;
 }
 
 /**

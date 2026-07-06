@@ -1,5 +1,5 @@
 /**
- * Workspace tools — bypass Bob's single-root sandbox so Bob can read any file
+ * Workspace tools - bypass Bob's single-root sandbox so Bob can read any file
  * from any folder in a multi-root VS Code workspace without per-file confirmation.
  *
  * Root cause: Bob's built-in read_file / list_files / grep / glob tools pass
@@ -7,12 +7,12 @@
  * a second or third workspace root triggers the "allow outside workspace?" prompt.
  *
  * These tools use `vscode.workspace.fs` directly from the extension-host process,
- * which has no such sandbox — all workspace folders are treated equally.
+ * which has no such sandbox - all workspace folders are treated equally.
  */
 
 import * as vscode from 'vscode';
 import * as path from 'path';
-import { getTaskManager, findTaskChatManager } from '../utils.js';
+import { getTaskManager, findTaskChatManager, resolveRipGrepBinary, spawnRipGrep, statMtimes, ripGrepFiles, buildIgnoreFileArgs, RG_FIELD_SEP } from '../utils.js';
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -81,28 +81,6 @@ async function readDirRecursive(
   }
 }
 
-/**
- * Minimal glob-style matching: supports * (any chars except /) and ** (any path).
- * Used by search_workspace_files and grep_workspace.
- */
-function matchGlob(pattern: string, filePath: string): boolean {
-  // Normalise separators
-  const p = filePath.replace(/\\/g, '/');
-  const pat = pattern.replace(/\\/g, '/');
-
-  // Convert glob to regex
-  const regexStr = pat
-    .replace(/[.+^${}()|[\]\\]/g, '\\$&') // escape regex special chars (not * or ?)
-    .replace(/\*\*/g, '\x00')              // placeholder for **
-    .replace(/\*/g, '[^/]*')               // * → any chars except /
-    .replace(/\x00/g, '.*')               // ** → any chars including /
-    .replace(/\?/g, '[^/]');              // ? → single char except /
-
-  const regex = new RegExp(`^${regexStr}$`, 'i');
-  // Match against full path or just filename
-  return regex.test(p) || regex.test(path.basename(p));
-}
-
 // ─── Shared helpers ───────────────────────────────────────────────────────────
 
 /** True when the workspace has more than one root folder. */
@@ -131,16 +109,16 @@ export class ListWorkspaceFoldersTool {
       'This workspace is a MULTI-ROOT workspace with folders at completely ' +
       'different paths on disk (e.g. c:\\src\\frontend AND c:\\src\\backend). ' +
       'Bob\'s built-in tools (read_file, list_files, glob, grep) only work for the ' +
-      'PRIMARY folder shown in environment_info — they will be blocked for all others. ' +
+      'PRIMARY folder shown in environment_info - they will be blocked for all others. ' +
       'ALWAYS call this first on any task that might touch more than one project. ' +
       'Then pass the folder\'s "name" as the "workspace" parameter to ' +
       'read_workspace_file / write_workspace_file / list_workspace_files / ' +
-      'search_workspace_files / grep_workspace.'
+      'glob_workspace / grep_workspace.'
     );
   }
 
   getCostEffectiveDescription(): string {
-    return 'List all VS Code workspace folder roots — call first, then use folder name as "workspace" param';
+    return 'List all VS Code workspace folder roots - call first, then use folder name as "workspace" param';
   }
 
   private static readonly PARAMS: any[] = [];
@@ -174,7 +152,7 @@ export class ListWorkspaceFoldersTool {
 
     context.pushResult(JSON.stringify({
       totalFolders: folders.length,
-      note: 'Pass the folder "name" as the "workspace" parameter to read_workspace_file / write_workspace_file / list_workspace_files / search_workspace_files / grep_workspace.',
+      note: 'Pass the folder "name" as the "workspace" parameter to read_workspace_file / write_workspace_file / list_workspace_files / glob_workspace / grep_workspace.',
       folders,
     }, null, 2));
   }
@@ -196,7 +174,7 @@ export class ReadWorkspaceFileTool {
 
   getDescription(_env?: any): string {
     return (
-      'Read the text content of any file in the VS Code workspace — including files in ' +
+      'Read the text content of any file in the VS Code workspace - including files in ' +
       'secondary workspace folders that are OUTSIDE the primary workspace root. ' +
       'MUST be used instead of read_file for any file not under the primary folder. ' +
       'Call list_workspace_folders first to get the folder name, then pass it as "workspace".'
@@ -320,7 +298,7 @@ export class ListWorkspaceFilesTool {
 
   getDescription(_env?: any): string {
     return (
-      'List files and directories inside any folder in the VS Code workspace — including ' +
+      'List files and directories inside any folder in the VS Code workspace - including ' +
       'secondary workspace folders OUTSIDE the primary workspace root. ' +
       'MUST be used instead of list_files for any directory not under the primary folder. ' +
       'Call list_workspace_folders first to get the folder name, then pass it as "workspace". ' +
@@ -363,12 +341,15 @@ export class ListWorkspaceFilesTool {
   getParameters(_env?: any): any[] { return ListWorkspaceFilesTool.PARAMS; }
 
   getLabels(args: Record<string, any>) {
-    const p = args?.path ? `/${args.path}` : '';
+    const loc = args?.workspace
+      ? `${args.workspace}${args.path ? `/${args.path}` : ''}`
+      : (args?.path ?? '.');
+    const recursive = args?.recursive ? ' recursively' : '';
     return {
-      displayName: `List: ${args?.workspace ?? ''}${p}`,
-      running: `Listing ${args?.workspace ?? ''}${p}...`,
-      success: `Listed ${args?.workspace ?? ''}${p}`,
-      error: `Failed to list ${args?.workspace ?? ''}${p}`,
+      displayName: `List Files in ${loc}`,
+      running: `Listing files in ${loc}${recursive}`,
+      success: `Listed files in ${loc}`,
+      error: `Failed to list files in ${loc}`,
     };
   }
 
@@ -431,12 +412,12 @@ export class ListWorkspaceFilesTool {
 
 // ─────────────────────────────────────────────────────────────────────────────
 
-export class SearchWorkspaceFilesTool {
-  static id = 'search_workspace_files';
+export class GlobWorkspaceTool {
+  static id = 'glob_workspace';
   groups = ['read'];
   permission = 'read';
 
-  getId() { return SearchWorkspaceFilesTool.id; }
+  getId() { return GlobWorkspaceTool.id; }
 
   /** Only expose this tool when there are multiple workspace roots. */
   enabled(_env?: any): boolean {
@@ -445,7 +426,7 @@ export class SearchWorkspaceFilesTool {
 
   getDescription(_env?: any): string {
     return (
-      'Find files by name pattern (glob) inside any folder in the VS Code workspace — ' +
+      'Find files by name pattern (glob) inside any folder in the VS Code workspace - ' +
       'including secondary workspace folders OUTSIDE the primary workspace root. ' +
       'MUST be used instead of glob for any directory not under the primary folder. ' +
       'Supports * (any chars within a path segment), ** (any path depth), and ? (single char). ' +
@@ -463,40 +444,39 @@ export class SearchWorkspaceFilesTool {
     {
       name: 'pattern',
       type: 'string',
-      description: 'Glob pattern to match against file paths relative to the workspace folder root. Examples: "**/*.ts", "src/**/*.test.ts", "*.json".',
-      detail: 'Glob pattern e.g. "**/*.ts"',
+      detail: 'Glob pattern to match files (e.g. "**/*.ts", "src/**/index.ts").',
       required: true,
       usage: '**/*.ts',
     },
     {
       name: 'workspace',
       type: 'string',
-      description: 'Workspace folder name as returned by list_workspace_folders. Omit to search all workspace folders.',
-      detail: 'Workspace folder name (optional, defaults to all folders)',
+      detail: 'Workspace folder name (from list_workspace_folders). Omit to search all folders.',
       required: false,
       usage: 'backend',
     },
     {
       name: 'path',
       type: 'string',
-      description: 'Subdirectory within the workspace folder to restrict the search. Omit to search from the folder root.',
-      detail: 'Subdirectory path within workspace folder (optional)',
+      detail: 'Directory to search in (relative to the workspace folder root). Defaults to workspace root.',
       required: false,
       usage: 'src',
     },
   ];
 
-  parameters = SearchWorkspaceFilesTool.PARAMS;
-  getParameters(_env?: any): any[] { return SearchWorkspaceFilesTool.PARAMS; }
+  parameters = GlobWorkspaceTool.PARAMS;
+  getParameters(_env?: any): any[] { return GlobWorkspaceTool.PARAMS; }
 
   getLabels(args: Record<string, any>) {
-    const pat = args?.pattern ?? '';
-    const loc = args?.workspace ? ` in ${args.workspace}${args.path ? `/${args.path}` : ''}` : '';
+    const pat = typeof args?.pattern === 'string' && args.pattern.trim() ? ` with pattern "${args.pattern}"` : '';
+    const loc = typeof args?.path === 'string' && args.path.trim()
+      ? ` in ${args.workspace ? `${args.workspace}/` : ''}${args.path}`
+      : (args?.workspace ? ` in ${args.workspace}` : '');
     return {
-      displayName: `Glob: ${pat}${loc}`,
-      running: `Searching for ${pat}...`,
-      success: `Found files matching ${pat}`,
-      error: `Failed to search for ${pat}`,
+      displayName: `Find Files${loc}${pat}`,
+      running: `Finding files${loc}${pat}`,
+      success: `Found files${loc}${pat}`,
+      error: `Failed to find files${loc}${pat}`,
     };
   }
 
@@ -507,7 +487,12 @@ export class SearchWorkspaceFilesTool {
     pushError: (text: string) => void;
   }): Promise<void> {
     const { pattern, workspace, path: subPath } = context.parameters;
-    const CAP = 200;
+    const MAX_RESULTS = 100;
+
+    if (!pattern?.trim()) {
+      context.pushError('pattern is required');
+      return;
+    }
 
     const folders = vscode.workspace.workspaceFolders ?? [];
     if (folders.length === 0) {
@@ -515,45 +500,64 @@ export class SearchWorkspaceFilesTool {
       return;
     }
 
-    let roots: Array<{ uri: vscode.Uri; label: string }>;
+    let roots: Array<{ fsPath: string; label: string }>;
     if (workspace) {
       const resolved = resolveInFolder(workspace, subPath ?? '');
       if ('error' in resolved) {
         context.pushError(JSON.stringify({ error: resolved.error }));
         return;
       }
-      roots = [{ uri: resolved.uri, label: subPath ? `${workspace}/${subPath}` : workspace }];
+      roots = [{ fsPath: resolved.uri.fsPath, label: subPath ? `${workspace}/${subPath}` : workspace }];
     } else {
-      roots = folders.map(f => ({ uri: f.uri, label: f.name }));
+      roots = folders.map(f => ({ fsPath: f.uri.fsPath, label: f.name }));
     }
 
-    const matches: Array<{ folder: string; path: string; fullPath: string }> = [];
+    const rgBinary = await resolveRipGrepBinary();
+    if (!rgBinary) {
+      context.pushError(JSON.stringify({ error: 'ripgrep binary not found under VS Code appRoot. Cannot search.' }));
+      return;
+    }
 
+    const allPaths: string[] = [];
     for (const root of roots) {
-      if (matches.length >= CAP) { break; }
-      const all: Array<{ path: string; type: string }> = [];
-      await readDirRecursive(root.uri, '', all, CAP - matches.length + 100);
-
-      for (const entry of all) {
-        if (entry.type !== 'file') { continue; }
-        if (matchGlob(pattern, entry.path)) {
-          matches.push({
-            folder: root.label,
-            path: entry.path,
-            fullPath: vscode.Uri.joinPath(root.uri, entry.path).fsPath,
-          });
-          if (matches.length >= CAP) { break; }
-        }
+      if (allPaths.length >= MAX_RESULTS) { break; }
+      // Mirror Bob's GlobTool.call(): pass buildIgnoreFileArgs so .gitignore/.bobignore are respected
+      const ignoreArgs = await buildIgnoreFileArgs(root.fsPath);
+      const args = [
+        '--files',
+        '--hidden',
+        '--glob=!.git/',
+        '--no-messages',
+        ...ignoreArgs,
+        '--glob', pattern.replace(/\\/g, '/'),
+        root.fsPath,
+      ];
+      try {
+        const found = await ripGrepFiles(rgBinary, args, MAX_RESULTS - allPaths.length);
+        allPaths.push(...found);
+      } catch {
+        // no matches in this root
       }
     }
 
-    context.pushResult(JSON.stringify({
-      pattern,
-      searchRoot: workspace ? (subPath ? `${workspace}/${subPath}` : workspace) : '(all workspace folders)',
-      totalMatches: matches.length,
-      capped: matches.length >= CAP,
-      matches,
-    }, null, 2));
+    if (allPaths.length === 0) {
+      context.pushResult('No files found');
+      return;
+    }
+
+    const total = allPaths.length;
+    const capped = total > MAX_RESULTS;
+    const shown = capped ? allPaths.slice(0, MAX_RESULTS) : allPaths;
+    // Paths are already relative to root; make them relative to the workspace root for display
+    const lines: string[] = shown.map(p => {
+      // Try to make relative to a workspace root for a clean display
+      const folder = (vscode.workspace.workspaceFolders ?? []).find(f => p.startsWith(f.uri.fsPath));
+      return folder ? path.relative(folder.uri.fsPath, p) : p;
+    });
+    if (capped) {
+      lines.push('', `(Results truncated: showing ${MAX_RESULTS} of ${total} entries. Use a more specific path or pattern.)`);
+    }
+    context.pushResult(lines.join('\n'));
   }
 }
 
@@ -573,7 +577,7 @@ export class GrepWorkspaceTool {
 
   getDescription(_env?: any): string {
     return (
-      'Search for a text pattern (regex or literal) inside files in the VS Code workspace — ' +
+      'Search for a text pattern (regex or literal) inside files in the VS Code workspace - ' +
       'including secondary workspace folders OUTSIDE the primary workspace root. ' +
       'MUST be used instead of grep for any directory not under the primary folder. ' +
       'Returns matching lines with file path and line number, grouped by file. ' +
@@ -590,40 +594,56 @@ export class GrepWorkspaceTool {
     {
       name: 'pattern',
       type: 'string',
-      description: 'Text or regex pattern to search for inside file contents. Use plain text for literal search, or a JavaScript regex pattern.',
-      detail: 'Search pattern (text or regex)',
+      detail: 'Regex pattern to search for in file contents (uses Rust regex syntax).',
       required: true,
       usage: 'function handleClick',
     },
     {
       name: 'workspace',
       type: 'string',
-      description: 'Workspace folder name as returned by list_workspace_folders. Omit to search all workspace folders.',
-      detail: 'Workspace folder name (optional, defaults to all folders)',
+      detail: 'Workspace folder name (from list_workspace_folders). Omit to search all folders.',
       required: false,
       usage: 'backend',
     },
     {
       name: 'path',
       type: 'string',
-      description: 'Subdirectory within the workspace folder to restrict the search. Omit to search from the folder root.',
-      detail: 'Subdirectory path within workspace folder (optional)',
+      detail: 'File or directory path to search in, relative to the workspace folder root. Accepts single path only. Defaults to workspace root.',
       required: false,
       usage: 'src',
     },
     {
       name: 'include',
       type: 'string',
-      description: 'Glob pattern to filter which files are searched. E.g. "**/*.ts" to only search TypeScript files. Omit to search all files.',
-      detail: 'File filter glob pattern (optional)',
+      detail: 'Glob pattern to filter files (e.g. "*.ts", "*.{ts,tsx}").',
       required: false,
       usage: '**/*.ts',
     },
     {
       name: 'ignore_case',
       type: 'boolean',
-      description: 'If true, perform case-insensitive matching. Defaults to false.',
-      detail: 'Case-insensitive (default: false)',
+      detail: 'Case-insensitive matching (-i).',
+      required: false,
+      usage: 'false',
+    },
+    {
+      name: 'invert_match',
+      type: 'boolean',
+      detail: 'Return lines that do NOT match the pattern (-v).',
+      required: false,
+      usage: 'false',
+    },
+    {
+      name: 'word_regexp',
+      type: 'boolean',
+      detail: 'Only match whole words - pattern must be surrounded by word boundaries (-w).',
+      required: false,
+      usage: 'false',
+    },
+    {
+      name: 'files_with_matches',
+      type: 'boolean',
+      detail: 'Return only file paths instead of individual matching lines (-l). Useful for checking which files contain a pattern.',
       required: false,
       usage: 'false',
     },
@@ -633,25 +653,37 @@ export class GrepWorkspaceTool {
   getParameters(_env?: any): any[] { return GrepWorkspaceTool.PARAMS; }
 
   getLabels(args: Record<string, any>) {
-    const pat = args?.pattern ?? '';
-    const loc = args?.workspace ? ` in ${args.workspace}${args.path ? `/${args.path}` : ''}` : '';
+    const pat = typeof args?.pattern === 'string' && args.pattern.trim() ? ` for "${args.pattern}"` : '';
+    const loc = typeof args?.path === 'string' && args.path.trim()
+      ? ` in ${args.workspace ? `${args.workspace}/` : ''}${args.path}`
+      : (args?.workspace ? ` in ${args.workspace}` : '');
     return {
-      displayName: `Grep: ${pat}${loc}`,
-      running: `Searching for "${pat}"...`,
-      success: `Searched for "${pat}"`,
-      error: `Failed to search for "${pat}"`,
+      displayName: `Search Files${loc}${pat}`,
+      running: `Searching files${loc}${pat}`,
+      success: `Searched files${loc}${pat}`,
+      error: `Failed to search files${loc}${pat}`,
     };
   }
 
   async call(context: {
     env: any;
-    parameters: { pattern: string; workspace?: string; path?: string; include?: string; ignore_case?: boolean };
+    parameters: {
+      pattern: string;
+      workspace?: string;
+      path?: string;
+      include?: string;
+      ignore_case?: boolean;
+      invert_match?: boolean;
+      word_regexp?: boolean;
+      files_with_matches?: boolean;
+    };
     pushResult: (text: string) => void;
     pushError: (text: string) => void;
   }): Promise<void> {
-    const { pattern, workspace, path: subPath, include: includeGlob, ignore_case = false } = context.parameters;
-    const LINE_CAP = 100;
-    const FILE_CAP = 500;
+    const { pattern, workspace, path: subPath, include: includeGlob,
+            ignore_case = false, invert_match = false, word_regexp = false,
+            files_with_matches = false } = context.parameters;
+    const MAX_MATCHES = 100;
 
     const folders = vscode.workspace.workspaceFolders ?? [];
     if (folders.length === 0) {
@@ -659,91 +691,135 @@ export class GrepWorkspaceTool {
       return;
     }
 
-    // Build regex
-    let regex: RegExp;
-    try {
-      regex = new RegExp(pattern, ignore_case ? 'i' : '');
-    } catch {
-      // Fall back to literal match
-      const escaped = pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      regex = new RegExp(escaped, ignore_case ? 'i' : '');
-    }
-
-    // Determine roots
-    let roots: Array<{ uri: vscode.Uri; label: string }>;
+    // Determine search roots (fsPath strings)
+    let roots: Array<{ fsPath: string; label: string }>;
     if (workspace) {
       const resolved = resolveInFolder(workspace, subPath ?? '');
       if ('error' in resolved) {
         context.pushError(JSON.stringify({ error: resolved.error }));
         return;
       }
-      roots = [{ uri: resolved.uri, label: subPath ? `${workspace}/${subPath}` : workspace }];
+      roots = [{ fsPath: resolved.uri.fsPath, label: subPath ? `${workspace}/${subPath}` : workspace }];
     } else {
-      roots = folders.map(f => ({ uri: f.uri, label: f.name }));
+      roots = folders.map(f => ({ fsPath: f.uri.fsPath, label: f.name }));
     }
 
+    // Resolve ripgrep - fall back to pure-JS implementation if not found
+    const rgBinary = await resolveRipGrepBinary();
+    if (!rgBinary) {
+      context.pushError(JSON.stringify({ error: 'ripgrep binary not found under VS Code appRoot. Cannot search.' }));
+      return;
+    }
+
+    // Args that go before the per-root ignore files (same flags as Bob's GrepTool)
+    const preArgs: string[] = ['--hidden', '--glob=!.git/', '--no-messages'];
+    if (files_with_matches) {
+      preArgs.unshift('-l');
+    } else {
+      preArgs.unshift('-nH', `--field-match-separator=${RG_FIELD_SEP}`);
+    }
+
+    // Args that go after the ignore files
+    const postArgs: string[] = ['-e', pattern];
+    if (ignore_case)   { postArgs.push('-i'); }
+    if (invert_match)  { postArgs.push('-v'); }
+    if (word_regexp)   { postArgs.push('-w'); }
+    if (includeGlob)   { postArgs.push('--glob', includeGlob.replace(/\\/g, '/')); }
+
+    // Run once per root and collect results
     interface LineMatch { line: number; text: string; }
     interface FileResult { folder: string; path: string; fullPath: string; matches: LineMatch[]; }
-    const results: FileResult[] = [];
+    const allResults: FileResult[] = [];
     let totalLines = 0;
+    let capped = false;
 
-    outer:
     for (const root of roots) {
-      const all: Array<{ path: string; type: string }> = [];
-      await readDirRecursive(root.uri, '', all, FILE_CAP);
+      // Build per-root ignore args so each workspace's .gitignore/.bobignore is respected
+      const ignoreArgs = await buildIgnoreFileArgs(root.fsPath);
+      const args = [...preArgs, ...ignoreArgs, ...postArgs, root.fsPath];
+      let raw: string;
+      try {
+        raw = await spawnRipGrep(rgBinary, args);
+      } catch (err) {
+        // No matches in this root — mirror Bob: don't push error, just skip
+        continue;
+      }
 
-      for (const entry of all) {
-        if (entry.type !== 'file') { continue; }
-        if (includeGlob && !matchGlob(includeGlob, entry.path)) { continue; }
-
-        const fileUri = vscode.Uri.joinPath(root.uri, entry.path);
-        let text: string;
-        try {
-          const bytes = await vscode.workspace.fs.readFile(fileUri);
-          text = Buffer.from(bytes).toString('utf8');
-        } catch {
-          continue;
-        }
-
-        const lines = text.split('\n');
-        const fileMatches: LineMatch[] = [];
-        for (let i = 0; i < lines.length; i++) {
-          if (regex.test(lines[i])) {
-            fileMatches.push({ line: i + 1, text: lines[i].trimEnd() });
-            totalLines++;
-            if (totalLines >= LINE_CAP) {
-              if (fileMatches.length > 0) {
-                results.push({
-                  folder: root.label,
-                  path: entry.path,
-                  fullPath: fileUri.fsPath,
-                  matches: fileMatches,
-                });
-              }
-              break outer;
-            }
-          }
-        }
-
-        if (fileMatches.length > 0) {
-          results.push({
+      if (files_with_matches) {
+        // Each line is a file path
+        for (const line of raw.trim().split(/\r?\n/).filter(Boolean)) {
+          allResults.push({
             folder: root.label,
-            path: entry.path,
-            fullPath: fileUri.fsPath,
-            matches: fileMatches,
+            path: path.relative(root.fsPath, line),
+            fullPath: line,
+            matches: [],
           });
         }
+        continue;
       }
+
+      // Parse -nH --field-match-separator output: filePath<SEP>lineNum<SEP>text
+      const fileMap = new Map<string, FileResult>();
+      for (const line of raw.trim().split(/\r?\n/).filter(Boolean)) {
+        const [filePath, lineNumStr, ...rest] = line.split(RG_FIELD_SEP);
+        if (!filePath || !lineNumStr) { continue; }
+        const lineNum = parseInt(lineNumStr, 10);
+        if (isNaN(lineNum)) { continue; }
+        const text = rest.join(RG_FIELD_SEP);
+
+        if (!fileMap.has(filePath)) {
+          fileMap.set(filePath, {
+            folder: root.label,
+            path: path.relative(root.fsPath, filePath),
+            fullPath: filePath,
+            matches: [],
+          });
+        }
+        fileMap.get(filePath)!.matches.push({ line: lineNum, text });
+        totalLines++;
+        if (totalLines >= MAX_MATCHES) { capped = true; }
+        if (capped) { break; }
+      }
+      allResults.push(...fileMap.values()); // always push, even if capped mid-file
+      if (capped) { break; }
     }
 
-    context.pushResult(JSON.stringify({
-      pattern,
-      searchRoot: workspace ? (subPath ? `${workspace}/${subPath}` : workspace) : '(all workspace folders)',
-      includeFilter: includeGlob ?? '(all files)',
-      totalMatchingLines: totalLines,
-      capped: totalLines >= LINE_CAP,
-      files: results,
-    }, null, 2));
+    if (files_with_matches) {
+      // Mirror Bob's formatFilesOutput: use relative paths, cap at MAX_MATCHES
+      const relPaths = allResults.map(r => r.path);
+      if (relPaths.length === 0) {
+        context.pushResult('No files found');
+        return;
+      }
+      const fileCapped = relPaths.length > MAX_MATCHES;
+      const shownPaths = fileCapped ? relPaths.slice(0, MAX_MATCHES) : relPaths;
+      const lines: string[] = [
+        `Found ${relPaths.length} file${relPaths.length === 1 ? '' : 's'} with matches`,
+        ...shownPaths,
+      ];
+      if (fileCapped) { lines.push('', '(Results truncated. Use a more specific path or pattern.)'); }
+      context.pushResult(lines.join('\n'));
+    } else {
+      if (allResults.length === 0) {
+        context.pushResult('No files found');
+        return;
+      }
+      // Sort by mtime descending (newest first) - same as Bob's formatOutput
+      const uniquePaths = [...new Set(allResults.map(r => r.fullPath))];
+      const mtimes = await statMtimes(uniquePaths);
+      allResults.sort((a, b) => (mtimes.get(b.fullPath) ?? 0) - (mtimes.get(a.fullPath) ?? 0));
+
+      const lines: string[] = [`Found ${totalLines} match${totalLines === 1 ? '' : 'es'}${capped ? ` (showing first ${MAX_MATCHES})` : ''}`];
+      for (const file of allResults) {
+        lines.push('');
+        lines.push(`${file.path}:`);
+        for (const m of file.matches) {
+          lines.push(`  Line ${m.line}: ${m.text.length > 2000 ? m.text.substring(0, 2000) + '...' : m.text}`);
+        }
+      }
+      if (capped) { lines.push(''); lines.push('(Results truncated. Use a more specific path or pattern.)'); }
+      context.pushResult(lines.join('\n'));
+    }
   }
 }
 
@@ -763,13 +839,13 @@ export class WriteWorkspaceFileTool {
 
   getDescription(_env?: any): string {
     return (
-      'Write (create or overwrite) a file in any folder in the VS Code workspace — ' +
+      'Write (create or overwrite) a file in any folder in the VS Code workspace - ' +
       'including secondary workspace folders OUTSIDE the primary workspace root. ' +
       'MUST be used instead of write_file for any file not under the primary folder. ' +
       'If the file does not exist it is created; if it exists it is fully overwritten. ' +
       'Parent directories are created automatically. ' +
       'Call list_workspace_folders first to get the folder name, then pass it as "workspace". ' +
-      'Always provide the COMPLETE intended content — this tool performs a full overwrite.'
+      'Always provide the COMPLETE intended content - this tool performs a full overwrite.'
     );
   }
 
@@ -801,7 +877,7 @@ export class WriteWorkspaceFileTool {
       type: 'string',
       description:
         'The COMPLETE content to write to the file. ' +
-        'Always provide the full intended file content — do not truncate or omit any part. ' +
+        'Always provide the full intended file content - do not truncate or omit any part. ' +
         'Do not include line numbers in the content.',
       detail: 'Full file content to write',
       required: true,
@@ -863,7 +939,7 @@ export class WriteWorkspaceFileTool {
     try {
       await vscode.workspace.fs.createDirectory(parentUri);
     } catch {
-      // Directory may already exist — ignore
+      // Directory may already exist - ignore
     }
 
     try {
@@ -895,19 +971,19 @@ export class WriteWorkspaceFileTool {
  * single-root sandbox and never trigger "outside workspace" confirmation prompts.
  *
  * Tools registered (6):
- *   list_workspace_folders  — discover all workspace roots
- *   read_workspace_file     — read any file (replaces read_file for non-primary folders)
- *   write_workspace_file    — write/create any file (replaces write_file for non-primary folders)
- *   list_workspace_files    — browse any directory (replaces list_files)
- *   search_workspace_files  — find files by glob (replaces glob)
- *   grep_workspace          — search file contents (replaces grep)
+ *   list_workspace_folders  - discover all workspace roots
+ *   read_workspace_file     - read any file (replaces read_file for non-primary folders)
+ *   write_workspace_file    - write/create any file (replaces write_file for non-primary folders)
+ *   list_workspace_files    - browse any directory (replaces list_files)
+ *   glob_workspace           - find files by glob (replaces glob)
+ *   grep_workspace          - search file contents (replaces grep)
  */
 export function registerWorkspaceTools(source: any) {
   source.registerTool(new ListWorkspaceFoldersTool());
   source.registerTool(new ReadWorkspaceFileTool());
   source.registerTool(new WriteWorkspaceFileTool());
   source.registerTool(new ListWorkspaceFilesTool());
-  source.registerTool(new SearchWorkspaceFilesTool());
+  source.registerTool(new GlobWorkspaceTool());
   source.registerTool(new GrepWorkspaceTool());
   registerWorkspacePromptInjection(source);
 }
@@ -916,7 +992,7 @@ export function registerWorkspaceTools(source: any) {
  * Inject multi-root workspace context into the system prompt on the first turn
  * of every task.
  *
- * onTurnStart fires before the system message exists — Bob builds it during
+ * onTurnStart fires before the system message exists - Bob builds it during
  * submitTurn, which runs after this callback returns. We poll with setTimeout(0)
  * until messages[0] with role === 'system' appears, then append our block.
  * Polling stops after MAX_POLLS attempts (~500 ms total) to avoid leaking.
@@ -947,14 +1023,14 @@ function registerWorkspacePromptInjection(source: any) {
         const systemMessage = messages?.[0];
 
         if (!systemMessage || systemMessage.role !== 'system') {
-          // System message not yet written — retry
+          // System message not yet written - retry
           if (++attempts < MAX_POLLS) { setTimeout(tryInject, POLL_MS); }
           return;
         }
 
         systemMessage.content += injection;
       } catch {
-        // Non-fatal — tools still work without the injection
+        // Non-fatal - tools still work without the injection
       }
     }
 
@@ -977,7 +1053,7 @@ function buildInjection(folders: readonly vscode.WorkspaceFolder[]): string {
     'For any file in a secondary folder, use the workspace-specific tools.',
     'WORKFLOW: call list_workspace_folders → copy the folder "name" → pass it as the',
     '"workspace" parameter to read_workspace_file / write_workspace_file /',
-    'list_workspace_files / search_workspace_files / grep_workspace.',
+    'list_workspace_files / glob_workspace / grep_workspace.',
     'The "path" parameter on those tools is always RELATIVE to the workspace folder root.',
     '</multi_root_workspace>',
   ].join('\n');

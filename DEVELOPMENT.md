@@ -75,7 +75,7 @@ bob-powertoys/
 
 ### Host Extension
 
-IBM Bob is a fork of VS Code. The Bob application ships a built-in extension with the VS Code extension ID **`IBM.bob-code`** — this is the extension that PowerToys activates against. It is always present in any Bob installation; there is nothing to install separately.
+IBM Bob is a fork of VS Code. The Bob application ships a built-in extension with the VS Code extension ID **`IBM.bob-code`** - this is the extension that PowerToys activates against. It is always present in any Bob installation; there is nothing to install separately.
 
 PowerToys declares `"extensionDependencies": ["IBM.bob-code"]` in `package.json`, which guarantees Bob is fully activated before our `activate()` runs, and gives us access to `bobExtension.exports` via:
 
@@ -230,7 +230,7 @@ export function getTaskManager(): any {
 
 ## System Prompt Injection Hack
 
-Bob builds a new system message on **every turn**. There is no public API for appending to it — but we can mutate the message object directly once it exists.
+Bob builds a new system message on **every turn**. There is no public API for appending to it - but we can mutate the message object directly once it exists.
 
 ### Why it's needed
 
@@ -250,7 +250,7 @@ When `onTurnStart` fires, `messages[0]` with `role === "system"` **does not yet 
 After `onTurnStart` fires we schedule a micro-task (`setTimeout(tryInject, 0)`) that polls until the system message appears, then mutates its `content` string in-place:
 
 ```typescript
-// src/tools/workspace.ts — registerWorkspacePromptInjection()
+// src/tools/workspace.ts - registerWorkspacePromptInjection()
 source.onTurnStart((taskId: string, _envs: any, isEmpty: boolean) => {
   if (!isEmpty || folders.length < 2) { return; }   // only on new turns in multi-root workspaces
 
@@ -268,7 +268,7 @@ source.onTurnStart((taskId: string, _envs: any, isEmpty: boolean) => {
 
     if (!systemMessage || systemMessage.role !== 'system') {
       if (++attempts < MAX_POLLS) { setTimeout(tryInject, POLL_MS); }
-      return;                                       // not ready yet — retry
+      return;                                       // not ready yet - retry
     }
 
     systemMessage.content += injection;             // mutate in-place ✓
@@ -285,14 +285,14 @@ source.onTurnStart((taskId: string, _envs: any, isEmpty: boolean) => {
 | `getTaskManager()` | Cached `_4` / N0 singleton from the extraction hack |
 | `cm.currentTask` | The active `Task` object inside the chatManager |
 | `cm.currentTask.getMessages()` | Returns the ordered message array for the current turn |
-| `messages[0]` | System message — always first; `role === "system"` when present |
-| `systemMessage.content` | Mutable string — append our block here |
+| `messages[0]` | System message - always first; `role === "system"` when present |
+| `systemMessage.content` | Mutable string - append our block here |
 
 ### Conditions checked before injecting
 
 | Condition | Reason |
 |---|---|
-| `isEmpty === true` | `onTurnStart` fires on every turn, including resume turns on an already-started task. `isEmpty` is `true` only when the task has **no prior messages** — i.e. the very first user message in a brand-new task. That's the only turn where the system message is freshly built and our injection needs to be added. |
+| `isEmpty === true` | `onTurnStart` fires on every turn, including resume turns on an already-started task. `isEmpty` is `true` only when the task has **no prior messages** - i.e. the very first user message in a brand-new task. That's the only turn where the system message is freshly built and our injection needs to be added. |
 | `folders.length >= 2` | Injection is only meaningful in multi-root workspaces |
 | `systemMessage.role === 'system'` | Guard against `messages` existing but not yet having a system entry |
 
@@ -301,10 +301,10 @@ source.onTurnStart((taskId: string, _envs: any, isEmpty: boolean) => {
 | Approach | Problem |
 |---|---|
 | Append synchronously in `onTurnStart` | System message doesn't exist yet at that point |
-| `appendSystem` option on `newMessage` | Internal to Bob's UI layer — not accessible from `registerSource` callbacks |
+| `appendSystem` option on `newMessage` | Internal to Bob's UI layer - not accessible from `registerSource` callbacks |
 | `source.onTurnEnd` + prepend | Turn is already finished; LLM never sees the update |
-| Long `setTimeout` (e.g. 200 ms) | Brittle — slow machines may miss it; fast machines waste time |
-| **Poll with `setTimeout(0)` × 50** | **Works — system message typically appears within 1–3 polls (~10–30 ms)** |
+| Long `setTimeout` (e.g. 200 ms) | Brittle - slow machines may miss it; fast machines waste time |
+| **Poll with `setTimeout(0)` × 50** | **Works - system message typically appears within 1–3 polls (~10–30 ms)** |
 
 ---
 
@@ -575,7 +575,7 @@ class MyTool {
 
 | File | Tools | Count |
 |---|---|---|
-| `workspace.ts` | `list_workspace_folders`, `read_workspace_file`, `write_workspace_file`, `list_workspace_files`, `search_workspace_files`, `grep_workspace` | 6 |
+| `workspace.ts` | `list_workspace_folders`, `read_workspace_file`, `write_workspace_file`, `list_workspace_files`, `glob_workspace`, `grep_workspace` | 6 |
 | `breakpoints.ts` | `set_breakpoints`, `remove_breakpoints`, `list_breakpoints` | 3 |
 | `debugControl.ts` | `step_over`, `step_into`, `step_out`, `continue_execution`, `pause_execution` | 5 |
 | `debugConsole.ts` | `evaluate_expression`, `get_variables`, `get_stack_trace`, `get_scopes`, `set_variable`, `get_debug_output` | 6 |
@@ -637,14 +637,14 @@ class MyTool {
 
 | Tool | Description |
 |---|---|
-| `list_workspace_folders` | List all root folders — call this first to discover folder names |
+| `list_workspace_folders` | List all root folders - call this first to discover folder names |
 | `read_workspace_file` | Read a file in any workspace folder (replaces `read_file` for non-primary folders) |
 | `write_workspace_file` | Write/create a file in any workspace folder (replaces `write_file` for non-primary folders) |
 | `list_workspace_files` | Browse a directory in any workspace folder (replaces `list_files`) |
-| `search_workspace_files` | Find files by glob pattern in any workspace folder (replaces `glob`) |
+| `glob_workspace` | Find files by glob pattern in any workspace folder (replaces `glob`) |
 | `grep_workspace` | Search file contents by regex in any workspace folder (replaces `grep`) |
 
-All six tools accept a `workspace` parameter (the folder `name` from `list_workspace_folders`) and a `path` relative to that folder root.  `search_workspace_files` and `grep_workspace` also accept an optional `workspace` param — omit it to search all folders at once.
+All six tools accept a `workspace` parameter (the folder `name` from `list_workspace_folders`) and a `path` relative to that folder root.  `glob_workspace` and `grep_workspace` also accept an optional `workspace` param - omit it to search all folders at once.
 
 ### Easter Egg (1)
 | Tool | Description |
@@ -723,7 +723,7 @@ class MyNewTool {
 
   getId(): string { return MyNewTool.id; }
 
-  // Optional — return false to hide tool from LLM entirely (e.g. wrong workspace type)
+  // Optional - return false to hide tool from LLM entirely (e.g. wrong workspace type)
   enabled(_env?: any): boolean { return true; }
 
   getDescription(_env?: any): string {
@@ -774,7 +774,7 @@ enabled(_env?: any): boolean {
 }
 ```
 
-Bob evaluates `enabled?.(env) ?? true` at tool-list build time. A tool returning `false` is excluded from the LLM's context entirely — it consumes no tokens and cannot be called.
+Bob evaluates `enabled?.(env) ?? true` at tool-list build time. A tool returning `false` is excluded from the LLM's context entirely - it consumes no tokens and cannot be called.
 
 ---
 
