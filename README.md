@@ -102,11 +102,11 @@ This works silently in the background: the save happens as you use Bob normally,
 
 When you open a Bob workspace with **multiple root folders at different paths on disk** (e.g. `...\src\frontend` and `...\src\backend` in the same `.code-workspace` file), Bob's built-in tools (`read_file`, `list_files`, `glob`, `grep`) are sandboxed to only the primary folder. Every file in a secondary folder triggers a "allow outside workspace?" confirmation prompt.
 
-Bob PowerToys solves this by providing six workspace-aware tools that use the VS Code filesystem API directly, with no sandbox restrictions. The tools are **automatically hidden** in single-root workspaces - they consume no tokens and cannot be called when there is only one folder.
+Bob PowerToys solves this by providing nine workspace-aware tools that use the VS Code filesystem API directly, with no sandbox restrictions. The tools are **automatically hidden** in single-root workspaces - they consume no tokens and cannot be called when there is only one folder.
 
 ## Available Tools
 
-Bob has access to 29 tools organized in 6 categories:
+Bob has access to 32 tools organized in 6 categories:
 
 ### Breakpoint Management (3 tools)
 - `set_breakpoints` - Set multiple breakpoints with optional conditions
@@ -140,9 +140,9 @@ Bob has access to 29 tools organized in 6 categories:
 - `search_terminal_output` - Search terminal with regex
 - `focus_terminal` - Bring terminal into focus
 
-### Multi-Root Workspace (6 tools)
+### Multi-Root Workspace (9 tools)
 
-> These tools are **only active in multi-root workspaces** (2+ root folders). They are invisible to the Bob in single-root workspaces.
+> These tools are **only active in multi-root workspaces** (2+ root folders). They are invisible to Bob in single-root workspaces.
 
 - `list_workspace_folders` - List all workspace root folders and their paths
 - `read_workspace_file` - Read any file from any workspace folder
@@ -150,6 +150,9 @@ Bob has access to 29 tools organized in 6 categories:
 - `list_workspace_files` - List files and directories in any workspace folder
 - `glob_workspace` - Find files by glob pattern across workspace folders
 - `grep_workspace` - Search file contents by regex across workspace folders
+- `insert_workspace_content` - Insert lines at a specific position in any file in any workspace folder
+- `search_and_replace_workspace` - Find-and-replace text (literal or regex) in any file in any workspace folder
+- `apply_diff_workspace` - Apply a SEARCH/REPLACE diff block to any file using Bob's fuzzy diff engine
 
 For detailed tool documentation and parameters, see [DEVELOPMENT.md](DEVELOPMENT.md).
 

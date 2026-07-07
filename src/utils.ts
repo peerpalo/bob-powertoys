@@ -95,13 +95,45 @@ export function findTaskChatManager(taskManager: any, taskId: string): any | nul
   return null;
 }
 
+// ─── Bob's ApplyDiffTool extraction ──────────────────────────────────────────
+
+/**
+ * Resolves Bob's ApplyDiffTool instance at call time by walking the task
+ * manager's live task graph:
+ *
+ *   taskManager.mainPanelTask → chatManager
+ *   chatManager.currentTask   → Task (has getTools())
+ *   task.getTools()           → flat tool array
+ *
+ * Bob stores tools in a plain array on the Task object, not in the yZ map
+ * registry. We look for the entry with id === "apply_diff".
+ *
+ * Returns null if the task manager is not ready or no task is active yet.
+ */
+export function getApplyDiffTool(): any {
+  const taskManager = _cachedTaskManager;
+  if (!taskManager) { return null; }
+
+  // Prefer the main panel chat manager; fall back to the first available one.
+  const chatManager: any =
+    taskManager.mainPanelTask ??
+    taskManager._chatManagers?.[0];
+  if (!chatManager) { return null; }
+
+  const task = chatManager.currentTask;
+  if (!task) { return null; }
+
+  const tools: any[] = task.getTools?.() ?? [];
+  return tools.find((t: any) => t.id === 'apply_diff') ?? null;
+}
+
 // ─── ripgrep binary resolution (mirrors Bob's own logic) ─────────────────────
 
 let _rgBinary: string | undefined;
 
 /**
  * Field separator used with ripgrep's --field-match-separator flag.
- * ASCII Unit Separator (0x1F) — matches Bob's GrepTool exactly, and is
+ * ASCII Unit Separator (0x1F) - matches Bob's GrepTool exactly, and is
  * safe on macOS, Linux, and Windows since it never appears in file paths
  * or source code.
  */

@@ -142,7 +142,7 @@ source.onCommandWillExecute(cb): void
 
 ---
 
-## Bob Internal Structures (Reverse-Engineered)
+## Bob Internal Structures
 
 These are minified names in Bob's webpack bundle (`dist/extension.js`). They may change between Bob versions.
 
@@ -489,7 +489,7 @@ Controls when Bob is automatically notified about breakpoint hits.
 
 **Key functions**:
 - `activate(context)` - entry point; registers status bar, waits for Bob, calls `registerTaskCommands`
-- `registerPowerToys(context, bobExports)` - awaits `registerTaskManager`, then `registerTaskPersistence` + `restoreTasks`, then registers debug tracker and all 29 tools
+- `registerPowerToys(context, bobExports)` - awaits `registerTaskManager`, then `registerTaskPersistence` + `restoreTasks`, then registers debug tracker and all 32 tools
 - `showStatus()` / `showStatusBarError()` - status bar management
 
 ### 2. taskManager.ts
@@ -542,15 +542,26 @@ flushPendingNotifications(): Promise<void>
 
 ### 4. utils.ts
 
-**Purpose**: Shared utilities - taskManager lifecycle, chat manager lookup, frame resolution.
+**Purpose**: Shared utilities - taskManager lifecycle, chat manager lookup, Bob tool access, ripgrep helpers, frame resolution.
 
 **Exported functions**:
 ```typescript
-extractTaskManager(bobExports: any): any           // internal hack, sync
+extractTaskManager(bobExports: any): any            // internal hack, sync
 registerTaskManager(bobExports: any): Promise<void> // resolves + caches, with retries
 getTaskManager(): any                               // returns cached instance
 findTaskChatManager(taskManager, taskId): any|null  // active + backgrounded lookup
+getApplyDiffTool(): any | null                      // resolves Bob's ApplyDiffTool from the active task at call time
+resolveRipGrepBinary(): Promise<string|undefined>   // finds the rg binary shipped with VS Code (cached)
+spawnRipGrep(binary, args, lineHardCap?): Promise<string>  // spawns rg, returns stdout; rejects on no matches
+ripGrepFiles(binary, args, maxResults): Promise<string[]>  // rg --files mode, sorted by mtime
+buildIgnoreFileArgs(workspaceRoot, respectGitIgnore?): Promise<string[]>  // --ignore-file args for .gitignore/.bobignore
+statMtimes(paths): Promise<Map<string, number>>     // stat() in parallel, returns mtime map
 resolveFrameId(frameId, resolveTopFrame): Promise<number|undefined>
+```
+
+**Constants**:
+```typescript
+RG_FIELD_SEP: '\x1f'   // field separator for ripgrep -nH output (ASCII Unit Separator)
 ```
 
 ### 4. Bob's Tool Interface
@@ -575,18 +586,18 @@ class MyTool {
 
 | File | Tools | Count |
 |---|---|---|
-| `workspace.ts` | `list_workspace_folders`, `read_workspace_file`, `write_workspace_file`, `list_workspace_files`, `glob_workspace`, `grep_workspace` | 6 |
+| `workspace.ts` | `list_workspace_folders`, `read_workspace_file`, `write_workspace_file`, `list_workspace_files`, `glob_workspace`, `grep_workspace`, `insert_workspace_content`, `search_and_replace_workspace`, `apply_diff_workspace` | 9 |
 | `breakpoints.ts` | `set_breakpoints`, `remove_breakpoints`, `list_breakpoints` | 3 |
 | `debugControl.ts` | `step_over`, `step_into`, `step_out`, `continue_execution`, `pause_execution` | 5 |
 | `debugConsole.ts` | `evaluate_expression`, `get_variables`, `get_stack_trace`, `get_scopes`, `set_variable`, `get_debug_output` | 6 |
 | `debugSession.ts` | `get_active_debug_session`, `list_debug_configurations`, `start_debug_session`, `stop_debug_session` | 4 |
 | `terminalConsole.ts` | `list_terminals`, `get_terminal_output`, `search_terminal_output`, `focus_terminal` | 4 |
 | `universeAnswer.ts` | `answer_to_life_universe_and_everything` | 1 |
-| **Total** | | **29** |
+| **Total** | | **32** |
 
 ---
 
-## Complete Tool Reference (29 Tools)
+## Complete Tool Reference (32 Tools)
 
 ### Breakpoint Tools (3)
 | Tool | Description |
@@ -630,7 +641,7 @@ class MyTool {
 | `search_terminal_output` | Search terminal output for a pattern |
 | `focus_terminal` | Focus a specific terminal |
 
-### Multi-Root Workspace Tools (6)
+### Multi-Root Workspace Tools (9)
 
 > **Visibility**: These tools are only active in multi-root VS Code workspaces (2+ root folders).
 > They are completely hidden from the LLM in single-root workspaces via the `enabled()` method.
@@ -643,8 +654,11 @@ class MyTool {
 | `list_workspace_files` | Browse a directory in any workspace folder (replaces `list_files`) |
 | `glob_workspace` | Find files by glob pattern in any workspace folder (replaces `glob`) |
 | `grep_workspace` | Search file contents by regex in any workspace folder (replaces `grep`) |
+| `insert_workspace_content` | Insert lines at a specific position in a file in any workspace folder (replaces `insert_content`) |
+| `search_and_replace_workspace` | Find-and-replace text (literal or regex) in a file in any workspace folder (replaces `search_and_replace`) |
+| `apply_diff_workspace` | Apply a SEARCH/REPLACE diff block to a file in any workspace folder using Bob's fuzzy diff engine (replaces `apply_diff`) |
 
-All six tools accept a `workspace` parameter (the folder `name` from `list_workspace_folders`) and a `path` relative to that folder root.  `glob_workspace` and `grep_workspace` also accept an optional `workspace` param - omit it to search all folders at once.
+All nine tools accept a `workspace` parameter (the folder `name` from `list_workspace_folders`) and a `path` relative to that folder root. `glob_workspace` and `grep_workspace` also accept an optional `workspace` param - omit it to search all folders at once. `apply_diff_workspace` requires an active Bob task to be running (it delegates to Bob's internal diff engine at call time).
 
 ### Easter Egg (1)
 | Tool | Description |
