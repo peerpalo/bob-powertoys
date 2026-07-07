@@ -2,9 +2,14 @@ name: Release
 
 on:
   workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Skip the publish job (build and test only)'
+        type: boolean
+        default: false
 
 env:
-  NODE_VERSION: '20'
+  NODE_VERSION: '24'
 
 permissions:
   contents: read
@@ -88,6 +93,7 @@ jobs:
 
   publish:
     needs: [build, test]
+    if: ${{ !inputs.dry_run }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
