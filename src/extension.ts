@@ -92,7 +92,7 @@ async function registerPowerToys(context: vscode.ExtensionContext, bobExports: a
     registerUniverseAnswerTool(source);        // 1 tool
     registerWorkspaceTools(source);            // 6 tools
 
-    console.log('[Bob - PowerToys] Successfully registered 29 tools with Bob');
+    console.log('[Bob - PowerToys] Successfully registered 30 tools with Bob');
     console.log('[Bob - PowerToys] Automatic breakpoint notifications enabled');
 
     if (statusBarItem) {
@@ -116,7 +116,7 @@ function showStatus() {
 
   const status = [
     'IBM Bob - PowerToys:',
-    '- Total Tools Registered: 29',
+    '- Total Tools Registered: 30',
     '- Automatic Breakpoint Notifications: Enabled',
     '- Active Debug Session: ' + sessionName,
     '- Breakpoints: ' + vscode.debug.breakpoints.length,

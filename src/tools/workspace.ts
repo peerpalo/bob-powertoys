@@ -12,7 +12,7 @@
 
 import * as vscode from 'vscode';
 import * as path from 'path';
-import { getTaskManager, findTaskChatManager, resolveRipGrepBinary, spawnRipGrep, statMtimes, ripGrepFiles, buildIgnoreFileArgs, RG_FIELD_SEP } from '../utils.js';
+import { getTaskManager, findTaskChatManager, resolveRipGrepBinary, spawnRipGrep, statMtimes, ripGrepFiles, buildIgnoreFileArgs, RG_FIELD_SEP, getApplyDiffTool } from '../utils.js';
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -86,6 +86,28 @@ async function readDirRecursive(
 /** True when the workspace has more than one root folder. */
 function isMultiRoot(): boolean {
   return (vscode.workspace.workspaceFolders?.length ?? 0) > 1;
+}
+
+/**
+ * Notify Bob that a file was changed so it can show the "N files changed /
+ * Undo all / Show all" UI.  Called BEFORE pushResult so the edit is registered
+ * before the tool is considered done.
+ *
+ * Errors are swallowed on purpose: the file has already been written to disk,
+ * so a failure here must never surface as a tool error.
+ */
+function notifyChange(
+  trackChange: ((uri: string, edit: { before: string; after: string }) => void) | undefined,
+  uri: vscode.Uri,
+  before: string,
+  after: string
+): void {
+  if (!trackChange) { return; }
+  try {
+    trackChange(uri.toString(), { before, after });
+  } catch {
+    // intentionally silent — the write already succeeded
+  }
 }
 
 // ─── Tool classes ─────────────────────────────────────────────────────────────
@@ -741,7 +763,7 @@ export class GrepWorkspaceTool {
       try {
         raw = await spawnRipGrep(rgBinary, args);
       } catch (err) {
-        // No matches in this root — mirror Bob: don't push error, just skip
+        // No matches in this root - mirror Bob: don't push error, just skip
         continue;
       }
 
@@ -911,6 +933,7 @@ export class WriteWorkspaceFileTool {
     parameters: { workspace: string; path: string; content: string; line_count?: number };
     pushResult: (text: string) => void;
     pushError: (text: string) => void;
+    trackChange?: (uri: string, edit: { before: string; after: string }) => void;
   }): Promise<void> {
     const { workspace, path: filePath, content, line_count } = context.parameters;
 
@@ -934,6 +957,15 @@ export class WriteWorkspaceFileTool {
       }
     }
 
+    // Read previous content for change tracking (best-effort; empty string for new files)
+    let before = '';
+    try {
+      const prevBytes = await vscode.workspace.fs.readFile(uri);
+      before = Buffer.from(prevBytes).toString('utf8');
+    } catch {
+      // New file - before stays ''
+    }
+
     // Ensure parent directory exists
     const parentUri = vscode.Uri.joinPath(uri, '..');
     try {
@@ -953,6 +985,8 @@ export class WriteWorkspaceFileTool {
       return;
     }
 
+    notifyChange(context.trackChange, uri, before, content);
+
     const lineCount = content.split('\n').length;
     context.pushResult(JSON.stringify({
       path: filePath,
@@ -963,6 +997,512 @@ export class WriteWorkspaceFileTool {
   }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+
+export class InsertWorkspaceContentTool {
+  static id = 'insert_workspace_content';
+  groups = ['edit'];
+  permission = 'edit';
+
+  getId() { return InsertWorkspaceContentTool.id; }
+
+  enabled(_env?: any): boolean { return isMultiRoot(); }
+
+  getDescription(_env?: any): string {
+    return (
+      'Add new lines of content into a file in any VS Code workspace folder without modifying ' +
+      'existing content. Specify the line number to insert before, or use line 0 to append to ' +
+      'the end. MUST be used instead of insert_content for files outside the primary folder. ' +
+      'Ideal for adding imports, functions, configuration blocks, or any multi-line text block.'
+    );
+  }
+
+  getCostEffectiveDescription(): string {
+    return 'Insert lines into a file in any workspace folder without overwriting (use instead of insert_content for non-primary folders)';
+  }
+
+  private static readonly PARAMS = [
+    {
+      name: 'workspace',
+      type: 'string',
+      detail: 'Workspace folder name as returned by list_workspace_folders (e.g. "backend").',
+      required: true,
+      usage: 'backend',
+      renderHint: 'hidden',
+    },
+    {
+      name: 'path',
+      type: 'string',
+      detail: 'File path relative to the workspace folder root (e.g. "src/app.ts").',
+      required: true,
+      usage: 'src/server.ts',
+      renderHint: 'hidden',
+    },
+    {
+      name: 'line',
+      type: 'number',
+      detail: 'Line number where content will be inserted (1-based). Use 0 to append at end of file. Use any positive number to insert before that line.',
+      required: true,
+      renderHint: 'text',
+    },
+    {
+      name: 'content',
+      type: 'string',
+      detail: 'The content to insert at the specified line.',
+      required: true,
+      renderHint: 'code',
+    },
+  ];
+
+  parameters = InsertWorkspaceContentTool.PARAMS;
+  getParameters(_env?: any): any[] { return InsertWorkspaceContentTool.PARAMS; }
+
+  getLabels(args: Record<string, any>) {
+    const loc = args?.path ? ` into ${args.workspace ? `${args.workspace}/` : ''}${args.path}` : '';
+    return {
+      displayName: `Insert Content${loc}`,
+      running: `Inserting content${loc}`,
+      success: `Inserted content${loc}`,
+      error: `Failed to insert content${loc}`,
+    };
+  }
+
+  async call(context: {
+    env: any;
+    parameters: { workspace: string; path: string; line: number; content: string };
+    pushResult: (text: string) => void;
+    pushError: (text: string) => void;
+    trackChange?: (uri: string, edit: { before: string; after: string }) => void;
+  }): Promise<void> {
+    const { workspace, path: filePath, line, content } = context.parameters;
+
+    const resolved = resolveInFolder(workspace, filePath);
+    if ('error' in resolved) {
+      context.pushError(JSON.stringify({ error: resolved.error }));
+      return;
+    }
+    const { uri } = resolved;
+
+    let existing: string;
+    try {
+      const bytes = await vscode.workspace.fs.readFile(uri);
+      existing = Buffer.from(bytes).toString('utf8');
+    } catch (err) {
+      context.pushError(`Error reading file ${filePath}: ${err instanceof Error ? err.message : String(err)}`);
+      return;
+    }
+
+    const lineNum = Number(line);
+    if (isNaN(lineNum) || lineNum < 0) {
+      context.pushError(`Invalid line number ${line}. Must be 0 or greater.`);
+      return;
+    }
+
+    // Detect line ending
+    const eol = existing.includes('\r\n') ? '\r\n' : '\n';
+    const rows = existing.split(/\r?\n/);
+
+    if (lineNum > rows.length) {
+      context.pushError(`Invalid line number ${lineNum}. File only has ${rows.length} lines.`);
+      return;
+    }
+
+    // Normalise inserted content to match file's line ending
+    const normalised = content.replace(/\r?\n/g, eol);
+
+    let after: string;
+    if (lineNum === 0) {
+      // Append: ensure file ends with a newline before appending
+      after = existing + (existing.endsWith('\n') ? '' : eol) + normalised;
+    } else {
+      // Insert before the given line (1-based → 0-based index)
+      rows.splice(lineNum - 1, 0, normalised);
+      after = rows.join(eol);
+    }
+
+    try {
+      await vscode.workspace.fs.writeFile(uri, Buffer.from(after, 'utf8'));
+    } catch (err) {
+      context.pushError(`Error inserting content into file ${filePath}: ${err instanceof Error ? err.message : String(err)}`);
+      return;
+    }
+
+    notifyChange(context.trackChange, uri, existing, after);
+
+    context.pushResult(
+      `Inserted content ${lineNum === 0 ? 'at end of' : `before line ${lineNum} of`} ` +
+      `${workspace}/${filePath} (file now has ${after.split(/\r?\n/).length} lines)`
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
+export class SearchAndReplaceWorkspaceTool {
+  static id = 'search_and_replace_workspace';
+  groups = ['edit'];
+  permission = 'edit';
+
+  getId() { return SearchAndReplaceWorkspaceTool.id; }
+
+  enabled(_env?: any): boolean { return isMultiRoot(); }
+
+  getDescription(_env?: any): string {
+    return (
+      'Find and replace specific text strings or patterns (using regex) within a file in any ' +
+      'VS Code workspace folder. Supports literal text and regex patterns, case sensitivity ' +
+      'options, and optional line ranges. MUST be used instead of search_and_replace for files ' +
+      'outside the primary folder.\n\n' +
+      'Notes:\n' +
+      '- When use_regex is true, the search parameter is treated as a regular expression pattern\n' +
+      '- When ignore_case is true, the search is case-insensitive regardless of regex mode'
+    );
+  }
+
+  getCostEffectiveDescription(): string {
+    return 'Find and replace text in a file in any workspace folder (use instead of search_and_replace for non-primary folders)';
+  }
+
+  private static readonly PARAMS = [
+    {
+      name: 'workspace',
+      type: 'string',
+      detail: 'Workspace folder name as returned by list_workspace_folders (e.g. "backend").',
+      required: true,
+      usage: 'backend',
+      renderHint: 'hidden',
+    },
+    {
+      name: 'path',
+      type: 'string',
+      detail: 'File path relative to the workspace folder root.',
+      required: true,
+      usage: 'src/server.ts',
+      renderHint: 'hidden',
+    },
+    {
+      name: 'search',
+      type: 'string',
+      detail: 'The text or pattern to search for.',
+      required: true,
+    },
+    {
+      name: 'replace',
+      type: 'string',
+      detail: 'The text to replace matches with.',
+      required: true,
+    },
+    {
+      name: 'start_line',
+      type: 'number',
+      detail: 'Starting line number for restricted replacement (1-based).',
+      required: false,
+    },
+    {
+      name: 'end_line',
+      type: 'number',
+      detail: 'Ending line number for restricted replacement (1-based).',
+      required: false,
+    },
+    {
+      name: 'use_regex',
+      type: 'string',
+      detail: 'Set to "true" to treat search as a regex pattern (default: false).',
+      required: false,
+    },
+    {
+      name: 'ignore_case',
+      type: 'string',
+      detail: 'Set to "true" to ignore case when matching (default: false).',
+      required: false,
+    },
+  ];
+
+  parameters = SearchAndReplaceWorkspaceTool.PARAMS;
+  getParameters(_env?: any): any[] { return SearchAndReplaceWorkspaceTool.PARAMS; }
+
+  getLabels(args: Record<string, any>) {
+    const loc = args?.path ? ` in ${args.workspace ? `${args.workspace}/` : ''}${args.path}` : '';
+    return {
+      displayName: `Search & Replace${loc}`,
+      running: `Searching and replacing${loc}`,
+      success: `Completed search and replace${loc}`,
+      error: `Failed to search and replace${loc}`,
+    };
+  }
+
+  async call(context: {
+    env: any;
+    parameters: {
+      workspace: string;
+      path: string;
+      search: string;
+      replace: string;
+      start_line?: number;
+      end_line?: number;
+      use_regex?: string;
+      ignore_case?: string;
+    };
+    pushResult: (text: string) => void;
+    pushError: (text: string) => void;
+    trackChange?: (uri: string, edit: { before: string; after: string }) => void;
+  }): Promise<void> {
+    const { workspace, path: filePath, search, replace,
+            start_line, end_line, use_regex, ignore_case } = context.parameters;
+
+    const toBool = (v: string | boolean | undefined): boolean =>
+      typeof v === 'boolean' ? v :
+      v === '1' || String(v ?? '').toLowerCase() === 'true' || String(v ?? '').toLowerCase() === 'yes';
+
+    const useRegex  = toBool(use_regex);
+    const ignoreCase = toBool(ignore_case);
+
+    const resolved = resolveInFolder(workspace, filePath);
+    if ('error' in resolved) {
+      context.pushError(JSON.stringify({ error: resolved.error }));
+      return;
+    }
+    const { uri } = resolved;
+
+    let existing: string;
+    try {
+      const bytes = await vscode.workspace.fs.readFile(uri);
+      existing = Buffer.from(bytes).toString('utf8');
+    } catch (err) {
+      context.pushError(`Error reading file ${filePath}: ${err instanceof Error ? err.message : String(err)}`);
+      return;
+    }
+
+    const eol = existing.includes('\r\n') ? '\r\n' : '\n';
+    const rows = existing.split(eol);
+    const lineCount = rows.length;
+
+    // Validate line range
+    if (start_line !== undefined && (start_line < 1 || start_line > lineCount)) {
+      context.pushError(`Invalid start_line: ${start_line}. Must be between 1 and ${lineCount}.`);
+      return;
+    }
+    if (end_line !== undefined && (end_line < 1 || end_line > lineCount)) {
+      context.pushError(`Invalid end_line: ${end_line}. Must be between 1 and ${lineCount}.`);
+      return;
+    }
+    if (start_line !== undefined && end_line !== undefined && start_line > end_line) {
+      context.pushError(`Invalid line range: start_line (${start_line}) must be less than or equal to end_line (${end_line})`);
+      return;
+    }
+
+    // Build regex - use 's' (dotAll) flag so '.' spans newlines, enabling multi-line search
+    let pattern: RegExp;
+    try {
+      if (useRegex) {
+        pattern = new RegExp(search, ignoreCase ? 'gis' : 'gs');
+      } else {
+        const escaped = search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        pattern = new RegExp(escaped, ignoreCase ? 'gis' : 'gs');
+      }
+    } catch (err) {
+      context.pushError(`Invalid regex pattern: ${err instanceof Error ? err.message : String(err)}`);
+      return;
+    }
+
+    let after: string;
+    let replacementCount = 0;
+
+    const hasLineRange = start_line !== undefined || end_line !== undefined;
+
+    if (!hasLineRange) {
+      // No line range: operate on the full file string so multi-line search/replace works correctly
+      const matches = existing.match(pattern);
+      if (!matches) {
+        context.pushError(`No matches found for search pattern`);
+        return;
+      }
+      replacementCount = matches.length;
+      after = existing.replace(pattern, replace);
+    } else {
+      // Line range: operate row-by-row on the restricted slice, same as Bob's computeEdit
+      const startIdx = start_line !== undefined ? start_line - 1 : 0;
+      const endIdx   = end_line   !== undefined ? end_line       : lineCount;
+      const newRows: string[] = rows.map((row, i) => {
+        if (i >= startIdx && i < endIdx) {
+          const m = row.match(pattern);
+          if (m) {
+            replacementCount += m.length;
+            return row.replace(pattern, replace);
+          }
+        }
+        return row;
+      });
+      if (replacementCount === 0) {
+        const rangeNote = ` in lines ${start_line || 1}-${end_line || lineCount}`;
+        context.pushError(`No matches found for search pattern${rangeNote}`);
+        return;
+      }
+      after = newRows.join(eol);
+    }
+
+    try {
+      await vscode.workspace.fs.writeFile(uri, Buffer.from(after, 'utf8'));
+    } catch (err) {
+      context.pushError(`Error writing file ${filePath}: ${err instanceof Error ? err.message : String(err)}`);
+      return;
+    }
+
+    notifyChange(context.trackChange, uri, existing, after);
+
+    const rangeNote = hasLineRange
+      ? ` in lines ${start_line || 1}-${end_line || lineCount}` : '';
+    context.pushResult(`Successfully replaced ${replacementCount} occurrence(s)${rangeNote} in ${workspace}/${filePath}`);
+  }
+}
+
+// ─── apply_diff_workspace ─────────────────────────────────────────────────────
+
+export class ApplyDiffWorkspaceTool {
+  static id = 'apply_diff_workspace';
+  groups = ['edit'];
+  permission = 'edit';
+
+  getId() { return ApplyDiffWorkspaceTool.id; }
+
+  enabled(_env?: any): boolean { return isMultiRoot(); }
+
+  getDescription(_env?: any): string {
+    return (
+      'Apply SEARCH/REPLACE diff blocks to a file in any VS Code workspace folder. ' +
+      'Works identically to apply_diff but accepts a "workspace" parameter to target ' +
+      'secondary workspace roots that apply_diff cannot reach. ' +
+      'Requires at least one Bob turn to have completed so the diff engine is loaded.'
+    );
+  }
+
+  getCostEffectiveDescription(): string {
+    return 'Apply diff blocks to any workspace folder file (replaces apply_diff for non-primary folders)';
+  }
+
+  private static readonly PARAMS = [
+    {
+      name: 'workspace',
+      type: 'string',
+      detail: 'Workspace folder name as returned by list_workspace_folders (e.g. "backend").',
+      required: true,
+      usage: 'backend',
+      renderHint: 'hidden',
+    },
+    {
+      name: 'path',
+      type: 'string',
+      detail: 'File path relative to the workspace folder root (e.g. "src/app.ts").',
+      required: true,
+      usage: 'src/server.ts',
+      renderHint: 'hidden',
+    },
+    {
+      name: 'diff',
+      type: 'string',
+      detail: 'The search/replace block defining the changes.',
+      required: true,
+      renderHint: 'diff',
+    },
+  ];
+
+  parameters = ApplyDiffWorkspaceTool.PARAMS;
+  getParameters(_env?: any): any[] { return ApplyDiffWorkspaceTool.PARAMS; }
+
+  getLabels(args: Record<string, any>) {
+    const loc = args?.path ? ` to ${args.workspace ? `${args.workspace}/` : ''}${args.path}` : '';
+    return {
+      displayName: `Apply Diff${loc}`,
+      running:     `Applying diff${loc}`,
+      success:     `Applied diff${loc}`,
+      error:       `Failed to apply diff${loc}`,
+    };
+  }
+
+  async call(context: {
+    env: any;
+    parameters: { workspace: string; path: string; diff: string };
+    pushResult: (text: string) => void;
+    pushError: (text: string) => void;
+    trackChange?: (uri: string, edit: { before: string; after: string }) => void;
+  }): Promise<void> {
+    const { workspace, path: filePath, diff } = context.parameters;
+
+    // Resolve workspace root
+    const resolved = resolveInFolder(workspace, '');
+    if ('error' in resolved) {
+      context.pushError(resolved.error);
+      return;
+    }
+    const folderRoot = resolved.uri.fsPath;
+    const absolutePath = path.resolve(folderRoot, filePath);
+
+    // Make sure the file exists
+    const fileUri = vscode.Uri.file(absolutePath);
+    let originalContent: string;
+    try {
+      const bytes = await vscode.workspace.fs.readFile(fileUri);
+      originalContent = Buffer.from(bytes).toString('utf8');
+    } catch {
+      context.pushError(`File does not exist at path: ${filePath}`);
+      return;
+    }
+
+    // Resolve Bob's ApplyDiffTool from the active task at call time.
+    const applyDiffTool = getApplyDiffTool();
+    if (!applyDiffTool) {
+      context.pushError(
+        'apply_diff_workspace: Bob\'s diff engine is not available. ' +
+        'Make sure a Bob task is active, then retry.'
+      );
+      return;
+    }
+
+    // Delegate to Bob's applyDiff() - same fuzzy engine, same format
+    let result: { success: boolean; content?: string; failParts?: any[] };
+    try {
+      result = await applyDiffTool.applyDiff(originalContent, diff);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      context.pushError(`Error applying diff: ${msg}`);
+      return;
+    }
+
+    if (!result.success) {
+      // Mirror Bob's error message format
+      const failDetails = result.failParts?.find((p: any) => !p.applied && p.error);
+      context.pushError(
+        failDetails?.error ??
+        `Unable to apply diff to file: ${filePath}\nAll SEARCH blocks failed to match.`
+      );
+      return;
+    }
+
+    // Write the patched content back
+    const patchedContent = result.content!;
+    try {
+      const out = Buffer.from(patchedContent, 'utf8');
+      await vscode.workspace.fs.writeFile(fileUri, out);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      context.pushError(`Diff computed but failed to write file: ${msg}`);
+      return;
+    }
+
+    notifyChange(context.trackChange, fileUri, originalContent, patchedContent);
+
+    const failCount = result.failParts?.filter((p: any) => !p.applied).length ?? 0;
+    if (failCount > 0) {
+      context.pushResult(
+        `Unable to apply all diff parts to file: ${filePath}, ` +
+        `use read_workspace_file to check the newest file version and re-apply diffs`
+      );
+    } else {
+      context.pushResult(`Applied diff to ${workspace}/${filePath}`);
+    }
+  }
+}
+
 // ─── Registration ─────────────────────────────────────────────────────────────
 
 /**
@@ -970,13 +1510,16 @@ export class WriteWorkspaceFileTool {
  * These tools use vscode.workspace.fs directly, so they bypass Bob's
  * single-root sandbox and never trigger "outside workspace" confirmation prompts.
  *
- * Tools registered (6):
- *   list_workspace_folders  - discover all workspace roots
- *   read_workspace_file     - read any file (replaces read_file for non-primary folders)
- *   write_workspace_file    - write/create any file (replaces write_file for non-primary folders)
- *   list_workspace_files    - browse any directory (replaces list_files)
- *   glob_workspace           - find files by glob (replaces glob)
- *   grep_workspace          - search file contents (replaces grep)
+ * Tools registered (9):
+ *   list_workspace_folders        - discover all workspace roots
+ *   read_workspace_file           - read any file (replaces read_file)
+ *   write_workspace_file          - write/create any file (replaces write_file)
+ *   list_workspace_files          - browse any directory (replaces list_files)
+ *   glob_workspace                - find files by glob (replaces glob)
+ *   grep_workspace                - search file contents (replaces grep)
+ *   insert_workspace_content      - insert lines without overwriting (replaces insert_content)
+ *   search_and_replace_workspace  - find/replace in file (replaces search_and_replace)
+ *   apply_diff_workspace          - apply diff blocks (replaces apply_diff)
  */
 export function registerWorkspaceTools(source: any) {
   source.registerTool(new ListWorkspaceFoldersTool());
@@ -985,6 +1528,9 @@ export function registerWorkspaceTools(source: any) {
   source.registerTool(new ListWorkspaceFilesTool());
   source.registerTool(new GlobWorkspaceTool());
   source.registerTool(new GrepWorkspaceTool());
+  source.registerTool(new InsertWorkspaceContentTool());
+  source.registerTool(new SearchAndReplaceWorkspaceTool());
+  source.registerTool(new ApplyDiffWorkspaceTool());
   registerWorkspacePromptInjection(source);
 }
 
@@ -1047,13 +1593,22 @@ function buildInjection(folders: readonly vscode.WorkspaceFolder[]): string {
     ...lines,
     '',
     `The PRIMARY folder (used by built-in tools) is: ${folders[0].uri.fsPath}`,
-    'Built-in tools (read_file, write_file, list_files, glob, grep) are SANDBOXED',
-    'to the primary folder and will be blocked for all other folders.',
+    'Built-in tools (read_file, write_file, list_files, glob, grep, insert_content,',
+    'search_and_replace) are SANDBOXED to the primary folder and will be blocked for',
+    'all other folders.',
     '',
-    'For any file in a secondary folder, use the workspace-specific tools.',
+    'For any file in a secondary folder, use the workspace-specific tools:',
+    '  read_workspace_file           - replaces read_file',
+    '  write_workspace_file          - replaces write_file',
+    '  list_workspace_files          - replaces list_files',
+    '  glob_workspace                - replaces glob',
+    '  grep_workspace                - replaces grep',
+    '  insert_workspace_content      - replaces insert_content',
+    '  search_and_replace_workspace  - replaces search_and_replace',
+    '  apply_diff_workspace          - replaces apply_diff',
+    '',
     'WORKFLOW: call list_workspace_folders → copy the folder "name" → pass it as the',
-    '"workspace" parameter to read_workspace_file / write_workspace_file /',
-    'list_workspace_files / glob_workspace / grep_workspace.',
+    '"workspace" parameter to the tool above.',
     'The "path" parameter on those tools is always RELATIVE to the workspace folder root.',
     '</multi_root_workspace>',
   ].join('\n');
