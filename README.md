@@ -63,7 +63,7 @@ Move Bob's chat panel to a separate OS window so you can place it on a second mo
 - Right-click anywhere inside Bob's chat panel and select **Open Task in Window**
 - Or open the `...` menu in Bob's toolbar and select **New Task In Window** to start a fresh task in its own window
 
-![Hello, World!](https://github.com/user-attachments/assets/033598cc-9136-4fa0-bfde-c7c9bb2429f6)
+![Hello, World!](https://raw.githubusercontent.com/peerpalo/bob-powertoys/main/assets/hello-world-new-window.gif)
 
 ### Restore Last Task
 
