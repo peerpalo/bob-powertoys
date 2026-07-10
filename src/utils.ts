@@ -1,6 +1,16 @@
 /**
- * Utility functions for Bob PowerToys tools
+ * Utility functions for PowerToys for Bob tools
  */
+
+export const EXTENSION_ID = 'bob-powertoys';
+export const EXTENSION_DISPLAY_NAME = 'PowerToys for Bob';
+export const LOG_PREFIX = `[${EXTENSION_DISPLAY_NAME}]`;
+
+export const logger = {
+  log:   (msg: string, ...args: unknown[]) => console.log(`${LOG_PREFIX} ${msg}`, ...args),
+  warn:  (msg: string, ...args: unknown[]) => console.warn(`${LOG_PREFIX} ${msg}`, ...args),
+  error: (msg: string, ...args: unknown[]) => console.error(`${LOG_PREFIX} ${msg}`, ...args),
+};
 
 import * as vscode from 'vscode';
 import * as path from 'path';
@@ -59,17 +69,17 @@ export async function registerTaskManager(bobExports: any): Promise<void> {
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     const taskManager = bobExports?.taskManager ?? extractTaskManager(bobExports);
     if (taskManager != null) {
-      console.log('[Bob PowerToys] taskManager obtained' + (bobExports?.taskManager ? ' via public API' : ' via internal hack') + (attempt > 1 ? ` (attempt ${attempt})` : ''));
+      logger.log('taskManager obtained' + (bobExports?.taskManager ? ' via public API' : ' via internal hack') + (attempt > 1 ? ` (attempt ${attempt})` : ''));
       _cachedTaskManager = taskManager;
       return;
     }
     if (attempt < MAX_ATTEMPTS) {
-      console.warn(`[Bob PowerToys] taskManager not available yet, retrying in ${DELAY_MS}ms (attempt ${attempt}/${MAX_ATTEMPTS})...`);
+      logger.warn(`taskManager not available yet, retrying in ${DELAY_MS}ms (attempt ${attempt}/${MAX_ATTEMPTS})...`);
       await new Promise(resolve => setTimeout(resolve, DELAY_MS));
     }
   }
 
-  throw new Error('[Bob PowerToys] taskManager not available after all retries: Bob may have changed its internals');
+  throw new Error(`${LOG_PREFIX} taskManager not available after all retries: Bob may have changed its internals`); // keep prefix in Error message
 }
 
 /**

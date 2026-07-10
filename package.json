@@ -1,7 +1,7 @@
 {
   "name": "bob-powertoys",
-  "displayName": "IBM Bob PowerToys",
-  "description": "Enhanced development tools for IBM Bob: debugging, terminal access, and quality-of-life improvements.",
+  "displayName": "PowerToys for Bob",
+  "description": "Enhanced development tools for [IBM Bob](https://bob.ibm.com/): debugging, terminal access, multi-root workspace support, and quality-of-life improvements.",
   "version": "0.6.2",
   "icon": "assets/icon.png",
   "license": "MIT",
@@ -31,18 +31,18 @@
     "commands": [
       {
         "command": "bob-powertoys.showStatus",
-        "category": "IBM Bob PowerToys",
+        "category": "PowerToys for Bob",
         "title": "Show Status"
       },
       {
         "command": "bob-powertoys.newTaskInWindow",
-        "category": "IBM Bob PowerToys",
+        "category": "PowerToys for Bob",
         "title": "New Task In Window",
         "shortTitle": "New Task In Window"
       },
       {
         "command": "bob-powertoys.openTaskInWindow",
-        "category": "IBM Bob PowerToys",
+        "category": "PowerToys for Bob",
         "title": "Open Task In Window"
       },
       {
@@ -72,7 +72,7 @@
       ]
     },
     "configuration": {
-      "title": "IBM Bob PowerToys",
+      "title": "PowerToys for Bob",
       "properties": {
         "breakpointNotifications": {
           "title": "Breakpoint Notifications",

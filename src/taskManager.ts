@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { getTaskManager } from './utils.js';
+import { getTaskManager, EXTENSION_ID, logger } from './utils.js';
 
 // Keys are suffixed with the workspace folder path so tasks from different
 // workspaces never bleed into each other.
@@ -9,10 +9,10 @@ function workspaceKey(): string {
   return folders?.[0]?.uri.fsPath ?? '__no_workspace__';
 }
 
-function sidebarKey(): string  { return `bob-powertoys.lastSidebarTaskId:${workspaceKey()}`; }
-function tabsKey(): string     { return `bob-powertoys.tabsTaskIds:${workspaceKey()}`; }
+function sidebarKey(): string  { return `${EXTENSION_ID}.lastSidebarTaskId:${workspaceKey()}`; }
+function tabsKey(): string     { return `${EXTENSION_ID}.tabsTaskIds:${workspaceKey()}`; }
 
-const HAS_LAST_SIDEBAR_TASK_CTX = 'bob-powertoys.hasLastSidebarTask';
+const HAS_LAST_SIDEBAR_TASK_CTX = `${EXTENSION_ID}.hasLastSidebarTask`;
 
 interface TabEntry { taskId: string; viewColumn: number; }
 type TabsStore = Record<string, TabEntry[]>; // windowKey -> entries
@@ -50,7 +50,7 @@ const wrappedWebviews = new WeakSet();
 export function registerTaskCommands(context: vscode.ExtensionContext): void {
   // Open a brand-new task in a new OS window
   context.subscriptions.push(
-    vscode.commands.registerCommand('bob-powertoys.newTaskInWindow', async () => {
+    vscode.commands.registerCommand(`${EXTENSION_ID}.newTaskInWindow`, async () => {
       await vscode.commands.executeCommand('bob-code.task.pickWorkspaceInEditor');
       await vscode.commands.executeCommand('workbench.action.moveEditorToNewWindow');
     })
@@ -58,7 +58,7 @@ export function registerTaskCommands(context: vscode.ExtensionContext): void {
 
   // Open the current sidebar task in a new OS window
   context.subscriptions.push(
-    vscode.commands.registerCommand('bob-powertoys.openTaskInWindow', async () => {
+    vscode.commands.registerCommand(`${EXTENSION_ID}.openTaskInWindow`, async () => {
       const taskManager = getTaskManager();
       const chatManager = taskManager?.getTopLevelChatManager?.();
       const taskId = chatManager && chatManager.isEmpty?.() === false
@@ -78,7 +78,7 @@ export function registerTaskCommands(context: vscode.ExtensionContext): void {
 
   // Open the current sidebar task as an editor tab (no new window)
   context.subscriptions.push(
-    vscode.commands.registerCommand('bob-powertoys.openTaskInEditor', async () => {
+    vscode.commands.registerCommand(`${EXTENSION_ID}.openTaskInEditor`, async () => {
       const taskManager = getTaskManager();
       const chatManager = taskManager?.getTopLevelChatManager?.();
       const taskId = chatManager && chatManager.isEmpty?.() === false
@@ -117,7 +117,7 @@ function wrapWebviewSendMessage(context: vscode.ExtensionContext, chatManager: a
     try {
       if (msg?.type === 'setCurrentTasks') {
         const hasTasks = (msg.tasks?.length ?? 0) > 0;
-        console.log('[Bob PowerToys] setCurrentTasks intercepted (isPanel=%s), tasks:', isPanel, msg.tasks?.length ?? 0);
+        logger.log('setCurrentTasks intercepted (isPanel=%s), tasks:', isPanel, msg.tasks?.length ?? 0);
         if (!isPanel || hasTasks) {
           saveTasks(context, chatManager, isPanel);
         }
@@ -135,7 +135,7 @@ function wrapWebviewSendMessage(context: vscode.ExtensionContext, chatManager: a
   }
 
   wrappedWebviews.add(wv);
-  console.log('[Bob PowerToys] webview sendMessage wrapped (isPanel=%s)', isPanel);
+  logger.log('webview sendMessage wrapped (isPanel=%s)', isPanel);
   return true;
 }
 
@@ -149,7 +149,7 @@ export function registerTaskPersistence(context: vscode.ExtensionContext): void 
   const chatManager = taskManager?.getTopLevelChatManager?.();
   
   if (!chatManager) {
-    console.warn('[Bob PowerToys] no chatManager: last task save disabled');
+    logger.warn('no chatManager: last task save disabled');
   } else {
     wrapWebviewSendMessage(context, chatManager, false);
   }
@@ -157,7 +157,7 @@ export function registerTaskPersistence(context: vscode.ExtensionContext): void 
   // Tab chatManagers are created at runtime inside openTask. Patch it so we
   // can wrap each new tab webview the moment Bob hands it back.
   if (!taskManager || typeof taskManager.openTask !== 'function') {
-    console.warn('[Bob PowerToys] taskManager.openTask not found: tab task tracking disabled');
+    logger.warn('taskManager.openTask not found: tab task tracking disabled');
     return;
   }
   if (taskManager.__bobPowerToysPatched) { return; } // idempotent
@@ -175,7 +175,7 @@ export function registerTaskPersistence(context: vscode.ExtensionContext): void 
     return result;
   };
 
-  console.log('[Bob PowerToys] taskManager.openTask patched for tab tracking');
+  logger.log('taskManager.openTask patched for tab tracking');
 }
 
 /**
@@ -192,11 +192,11 @@ export async function restoreTasks(context: vscode.ExtensionContext): Promise<vo
   if (lastTaskId) {
     lastSidebarTaskId = lastTaskId;
     vscode.commands.executeCommand('setContext', HAS_LAST_SIDEBAR_TASK_CTX, true);
-    console.log(`[Bob PowerToys] Restoring last sidebar task: ${lastTaskId}`);
+    logger.log(`Restoring last sidebar task: ${lastTaskId}`);
     try {
       await taskManager.openTask({ taskId: lastTaskId });
     } catch {
-      console.warn(`[Bob PowerToys] Could not restore sidebar task ${lastTaskId}: it may have been deleted`);
+      logger.warn(`Could not restore sidebar task ${lastTaskId}: it may have been deleted`);
       lastSidebarTaskId = undefined;
       vscode.commands.executeCommand('setContext', HAS_LAST_SIDEBAR_TASK_CTX, false);
       await context.globalState.update(sidebarKey(), undefined);
@@ -214,13 +214,13 @@ export async function restoreTasks(context: vscode.ExtensionContext): Promise<vo
   if (entries.length === 0 && !lastTaskId) {
     // This window has nothing to restore - it was reopened blank by VSCode's
     // window restore. Close it so it doesn't linger as an empty window.
-    console.log('[Bob PowerToys] Nothing to restore for this window');
+    logger.log('Nothing to restore for this window');
     return;
   }
 
   const surviving: TabEntry[] = [];
   for (const entry of entries) {
-    console.log(`[Bob PowerToys] Restoring tab task: ${entry.taskId} col:${entry.viewColumn} (window: ${currentKey})`);
+    logger.log(`Restoring tab task: ${entry.taskId} col:${entry.viewColumn} (window: ${currentKey})`);
     try {
       const chatManager = await taskManager.openTaskInNewTab(entry.taskId);
       // Reveal the panel in its original column within this window.
@@ -228,7 +228,7 @@ export async function restoreTasks(context: vscode.ExtensionContext): Promise<vo
       panel?.reveal(entry.viewColumn, true);
       surviving.push(entry);
     } catch {
-      console.warn(`[Bob PowerToys] Could not restore tab task ${entry.taskId}: it may have been deleted`);
+      logger.warn(`Could not restore tab task ${entry.taskId}: it may have been deleted`);
     }
   }
 
@@ -252,7 +252,7 @@ async function saveTasks(context: vscode.ExtensionContext, chatManager: any, isP
       ? topLevelChatManager.getTaskId?.()
       : undefined;
 
-    console.log(`[Bob PowerToys] Saving last sidebar task: ${lastSidebarTaskId}`);
+    logger.log(`Saving last sidebar task: ${lastSidebarTaskId}`);
     vscode.commands.executeCommand('setContext', HAS_LAST_SIDEBAR_TASK_CTX, !!lastSidebarTaskId);
     await context.globalState.update(sidebarKey(), lastSidebarTaskId);
   } else {
@@ -275,7 +275,7 @@ async function saveTasks(context: vscode.ExtensionContext, chatManager: any, isP
       ? current.map((e, i) => i === existing ? entry : e)
       : [...current, entry];
 
-    console.log(`[Bob PowerToys] Saving tab task: ${taskId} col:${viewColumn} (window: ${wsKey}, total: ${updated.length})`);
+    logger.log(`Saving tab task: ${taskId} col:${viewColumn} (window: ${wsKey}, total: ${updated.length})`);
     await context.globalState.update(tabsKey(), { ...all, [wsKey]: updated });
   }
 }
@@ -290,7 +290,7 @@ async function removeTabTask(context: vscode.ExtensionContext, taskId: string): 
   const filtered = current.filter(e => e.taskId !== taskId);
   if (filtered.length === current.length) { return; }
 
-  console.log(`[Bob PowerToys] Removing tab task: ${taskId} (window: ${wsKey}, remaining: ${filtered.length})`);
+  logger.log(`Removing tab task: ${taskId} (window: ${wsKey}, remaining: ${filtered.length})`);
   const updated: TabsStore = { ...all, [wsKey]: filtered };
   if (filtered.length === 0) { delete updated[wsKey]; }
   await context.globalState.update(tabsKey(), Object.keys(updated).length > 0 ? updated : undefined);
