@@ -1,10 +1,12 @@
-# IBM Bob PowerToys
+# PowerToys for Bob
 
-Power tools for [IBM Bob AI Assistant](https://bob.ibm.com/): debugging, terminal access, multi-root workspace support, and quality-of-life improvements.
+Enhanced development tools for [IBM Bob](https://bob.ibm.com/): debugging, terminal access, multi-root workspace support, and quality-of-life improvements.
 
-## What is IBM Bob PowerToys?
+## What is PowerToys for Bob?
 
-IBM Bob PowerToys is an IBM Bob extension that **supercharges your development workflow**. It supports multi-root workspaces, letting Bob read, write, and search files across all your workspace folders seamlessly. It adds quality-of-life improvements like detaching the chat panel to a separate OS window and automatically restoring the last active task on reopen. It also gives Bob direct access to your debugging sessions so it can set breakpoints, inspect variables, control execution, and read terminal output: all without manual copy-pasting.
+PowerToys for Bob is an IBM Bob extension that **supercharges your development workflow**. It supports multi-root workspaces, letting Bob read, write, and search files across all your workspace folders seamlessly. It adds quality-of-life improvements like detaching the chat panel to a separate OS window and automatically restoring the last active task on reopen. It also gives Bob direct access to your debugging sessions so it can set breakpoints, inspect variables, control execution, and read terminal output: all without manual copy-pasting.
+
+> **Disclaimer:** PowerToys for Bob is a personal project. It is not affiliated with, endorsed by, or supported by IBM.
 
 ## Features
 
@@ -27,7 +29,7 @@ The extension provides one configuration setting:
 - `bobOnly` (default): Only notify for breakpoints set through Bob's tools
 - `all`: Notify for all breakpoint hits
 
-Access via: Bob Settings > Extensions > IBM Bob PowerToys
+Access via: Bob Settings > Extensions > PowerToys for Bob
 
 ## Usage
 
@@ -75,7 +77,7 @@ This works silently in the background: the save happens as you use Bob normally,
 
 When you open a Bob workspace with **multiple root folders at different paths on disk** (e.g. `...\src\frontend` and `...\src\backend` in the same `.code-workspace` file), Bob's built-in tools (`read_file`, `list_files`, `glob`, `grep`) are sandboxed to only the primary folder. Every file in a secondary folder triggers a "allow outside workspace?" confirmation prompt.
 
-Bob PowerToys solves this by providing nine workspace-aware tools that use the VS Code filesystem API directly, with no sandbox restrictions. The tools are **automatically hidden** in single-root workspaces - they consume no tokens and cannot be called when there is only one folder.
+PowerToys for Bob solves this by providing nine workspace-aware tools that use the VS Code filesystem API directly, with no sandbox restrictions. The tools are **automatically hidden** in single-root workspaces - they consume no tokens and cannot be called when there is only one folder.
 
 ## Available Tools
 

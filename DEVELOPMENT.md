@@ -1,4 +1,4 @@
-# Bob PowerToys Development Guide
+# PowerToys for Bob Development Guide
 
 ## Project Structure
 
@@ -35,7 +35,7 @@ bob-powertoys/
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
-│                Bob Extension: Bob PowerToys                      │
+│                Bob Extension: PowerToys for Bob                  │
 ├──────────────────────────────────────────────────────────────────┤
 │                                                                  │
 │  ┌──────────────────┐         ┌──────────────────────────────┐   │
@@ -54,7 +54,7 @@ bob-powertoys/
 │           │                    └─────────────────────┘           │
 │           ▼                                                      │
 │  ┌───────────────────────────────────────────────────────────┐   │
-│  │  Bob Internal Hack (taskManager extraction)               │   │
+│  │  Bob Internal taskManager extraction                      │   │
 │  │  - extractTaskManager via Array.prototype.find patch      │   │
 │  │  - enables: openTaskInWindow, last-task persistence       │   │
 │  └───────────────────────────────────────────────────────────┘   │
@@ -140,16 +140,7 @@ source.onCommandWillExecute(cb): void
 
 ## Bob Internal Structures
 
-These are minified names in Bob's webpack bundle (`dist/extension.js`). They may change between Bob versions.
-
-| Internal name | What it is |
-|---|---|
-| `N0` | The `_4` class instance = taskManager singleton |
-| `_4` | taskManager class |
-| `J8e` | chatManager class (one per open task panel) |
-| `xi.Instance` | Source registry singleton |
-
-### taskManager (`_4`) - key methods
+### taskManager - key methods
 
 ```typescript
 taskManager.getTopLevelChatManager()          // returns mainPanelTask (sidebar panel chatManager)
@@ -164,7 +155,7 @@ taskManager.getTaskMetadata(taskId)
 taskManager.store.onEvent(cb)                 // fires task.created / task.opened / task.updated / task.deleted / task.status / task.cancelled
 ```
 
-### chatManager (`J8e`) - key methods
+### chatManager - key methods
 
 ```typescript
 chatManager.getTaskId()                       // current task ID (numeric string)
@@ -190,7 +181,7 @@ webview.view                                  // underlying VSCode WebviewPanel 
 
 ---
 
-## taskManager Extraction Hack
+## taskManager Extraction
 
 Bob does not expose `taskManager` in its public API. We obtain it by temporarily patching `Array.prototype.find`:
 
@@ -199,7 +190,7 @@ bobExports.setChatContent('', false)
   └─► chatManager.getTopLevelChatManager()
         └─► this._chatManagers.find(e => e.view?.isPanel === false)
               └─► Array.prototype.find fires with this = _chatManagers array
-                    └─► this[0].taskManager  ← that's N0 ✓
+                    └─► this[0].taskManager  ← that's N0
 ```
 
 The patch lives for a single synchronous call and is removed in a `finally` block.
@@ -224,7 +215,7 @@ export function getTaskManager(): any {
 
 ---
 
-## System Prompt Injection Hack
+## System Prompt Injection
 
 Bob builds a new system message on **every turn**. There is no public API for appending to it - but we can mutate the message object directly once it exists.
 
@@ -233,7 +224,7 @@ Bob builds a new system message on **every turn**. There is no public API for ap
 `source.onTurnStart` is the earliest hook we have. However, the call sequence is:
 
 ```
-xi.Instance.onTurnStart(taskId, envs, isEmpty)   ← our callback fires HERE
+onTurnStart(taskId, envs, isEmpty) ← our callback fires HERE
   └─► l.submitTurn(...)
         └─► ZJo(t, ...)
               └─► t.newMessage({ appendSystem: ..., ... })  ← system message built HERE
@@ -308,10 +299,10 @@ source.onTurnStart((taskId: string, _envs: any, isEmpty: boolean) => {
 
 | Command ID | Title (palette) | Where it appears |
 |---|---|---|
-| `bob-powertoys.showStatus` | IBM Bob PowerToys: Show Status | Command palette |
-| `bob-powertoys.newTaskInWindow` | IBM Bob PowerToys: New Task In Window | `bob-code.moreOptions` dropdown (the "..." button) |
-| `bob-powertoys.openTaskInWindow` | IBM Bob PowerToys: Open Task In Window | Right-click inside Bob's webview (`webview/context`) |
-| `bob-powertoys.openTaskInEditor` | IBM Bob PowerToys: Open Task In Editor | Right-click inside Bob's webview (`webview/context`) |
+| `bob-powertoys.showStatus` | PowerToys for Bob: Show Status | Command palette |
+| `bob-powertoys.newTaskInWindow` | PowerToys for Bob: New Task In Window | `bob-code.moreOptions` dropdown (the "..." button) |
+| `bob-powertoys.openTaskInWindow` | PowerToys for Bob: Open Task In Window | Right-click inside Bob's webview (`webview/context`) |
+| `bob-powertoys.openTaskInEditor` | PowerToys for Bob: Open Task In Editor | Right-click inside Bob's webview (`webview/context`) |
 
 > **Note:** "New Task In Editor" is intentionally absent - Bob already provides this action in its own "More Options" (`...`) menu, so we don't duplicate it.
 
@@ -693,18 +684,18 @@ npm run watch            # watch mode
 1. Edit source in `src/`
 2. `npm run compile` (or watch mode)
 3. Press `F5` to open Extension Development Host
-4. Open Bob's **Output** channel or the **Developer Tools** console (`Help -> Toggle Developer Tools`) to see `[Bob PowerToys]` logs
+4. Open Bob's **Output** channel or the **Developer Tools** console (`Help -> Toggle Developer Tools`) to see `[PowerToys for Bob]` logs
 
 ### Key debug log lines to watch for
 
 ```
-[Bob PowerToys] Extension activating...
-[Bob PowerToys] taskManager obtained via internal hack
-[Bob PowerToys] webview sendMessage wrapped
-[Bob PowerToys] setCurrentTasks intercepted, tasks: 1
-[Bob PowerToys] Saving last task: <taskId>
-[Bob PowerToys] Restoring last task: <taskId>
-[Bob PowerToys] Successfully registered 29 tools with Bob
+[PowerToys for Bob] Extension activating...
+[PowerToys for Bob] taskManager obtained via internal hack
+[PowerToys for Bob] webview sendMessage wrapped
+[PowerToys for Bob] setCurrentTasks intercepted, tasks: 1
+[PowerToys for Bob] Saving last task: <taskId>
+[PowerToys for Bob] Restoring last task: <taskId>
+[PowerToys for Bob] Successfully registered 29 tools with Bob
 ```
 
 ---
@@ -795,7 +786,7 @@ Bob evaluates `enabled?.(env) ?? true` at tool-list build time. A tool returning
 
 ### Extension doesn't activate
 - Check that IBM Bob (`IBM.bob-code`) is installed and active
-- Check Output panel for `[Bob PowerToys]` errors
+- Check Output panel for `[PowerToys for Bob]` errors
 
 ### Tools don't appear in Bob
 - Verify `registerSource` didn't throw (check Dev Tools console)
