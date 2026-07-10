@@ -2,7 +2,7 @@
   "name": "bob-powertoys",
   "displayName": "PowerToys for Bob",
   "description": "Enhanced development tools for [IBM Bob](https://bob.ibm.com/): debugging, terminal access, multi-root workspace support, and quality-of-life improvements.",
-  "version": "0.6.2",
+  "version": "0.6.3",
   "icon": "assets/icon.png",
   "license": "MIT",
   "publisher": "peerpalo",
