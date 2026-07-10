@@ -1,10 +1,10 @@
-# IBM Bob - PowerToys
+# IBM Bob PowerToys
 
 Power tools for [IBM Bob AI Assistant](https://bob.ibm.com/): debugging, terminal access, multi-root workspace support, and quality-of-life improvements.
 
-## What is IBM Bob - PowerToys?
+## What is IBM Bob PowerToys?
 
-IBM Bob - PowerToys is an IBM Bob extension that enhances the assistant with direct access to your debugging sessions and terminal output. It also adds quality-of-life improvements: detaching the chat panel to a separate OS window, and automatically restoring the last active task when you reopen the application. Bob can set breakpoints, inspect variables, control execution, and read terminal output: all without manual copy-pasting.
+IBM Bob PowerToys is an IBM Bob extension that **supercharges your development workflow**. It supports multi-root workspaces, letting Bob read, write, and search files across all your workspace folders seamlessly. It adds quality-of-life improvements like detaching the chat panel to a separate OS window and automatically restoring the last active task on reopen. It also gives Bob direct access to your debugging sessions so it can set breakpoints, inspect variables, control execution, and read terminal output: all without manual copy-pasting.
 
 ## Features
 
@@ -13,37 +13,10 @@ IBM Bob - PowerToys is an IBM Bob extension that enhances the assistant with dir
 - **Variable Inspection**: Evaluate expressions and inspect variables at any point
 - **Stack Traces**: Get call stacks and navigate frames
 - **Terminal Access**: Read and search terminal output
-- **Automatic Notifications**: Bob is notified when breakpoints are hit
+- **Automatic Breakpoint Notifications**: Bob is notified when breakpoints are hit
 - **Multi-Root Workspace Support**: Read, write, and search files across all workspace folders without per-file confirmation prompts
 - **Open Task in New Window**: Detach Bob's chat panel to a separate OS window so you can move it to another monitor
 - **Restore Last Task**: Bob automatically reopens the task you were working on when you restart the application
-
-## Installation
-
-### From GitHub Releases (Recommended)
-
-1. Download the latest `.vsix` file from [GitHub Releases](https://github.com/peerpalo/bob-powertoys/releases)
-2. Install in IBM Bob:
-   - **Option 1**: Open Bob → Extensions → `...` menu → Install from VSIX
-   - **Option 2**: Run `bob --install-extension bob-powertoys-X.X.X.vsix`
-3. Reload Bob when prompted
-
-### From Source (Development)
-
-1. Clone the repository:
-   ```bash
-   git clone https://github.com/peerpalo/bob-powertoys.git
-   cd bob-powertoys
-   ```
-2. Install dependencies:
-   ```bash
-   npm install
-   ```
-3. Compile TypeScript:
-   ```bash
-   npm run compile
-   ```
-4. Press `F5` in Bob to launch the extension in debug mode
 
 ## Configuration
 
@@ -54,7 +27,7 @@ The extension provides one configuration setting:
 - `bobOnly` (default): Only notify for breakpoints set through Bob's tools
 - `all`: Notify for all breakpoint hits
 
-Access via: Bob Settings > Extensions > IBM Bob - PowerToys
+Access via: Bob Settings > Extensions > IBM Bob PowerToys
 
 ## Usage
 
@@ -90,7 +63,7 @@ Move Bob's chat panel to a separate OS window so you can place it on a second mo
 - Right-click anywhere inside Bob's chat panel and select **Open Task in Window**
 - Or open the `...` menu in Bob's toolbar and select **New Task In Window** to start a fresh task in its own window
 
-https://github.com/user-attachments/assets/2aa249e8-1299-4130-9f02-a5f1c655e921
+![Hello, World!](https://github.com/user-attachments/assets/033598cc-9136-4fa0-bfde-c7c9bb2429f6)
 
 ### Restore Last Task
 

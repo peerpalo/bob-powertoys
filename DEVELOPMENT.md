@@ -1,9 +1,5 @@
 # Bob PowerToys Development Guide
 
-## Project Overview
-
-IBM Bob - PowerToys is an IBM Bob extension that enhances the assistant with direct access to your debugging sessions and terminal output. It also adds quality-of-life improvements: detaching the chat panel to a separate OS window, and automatically restoring the last active task when you reopen the application. Bob can set breakpoints, inspect variables, control execution, and read terminal output: all without manual copy-pasting.
-
 ## Project Structure
 
 ```
@@ -312,10 +308,10 @@ source.onTurnStart((taskId: string, _envs: any, isEmpty: boolean) => {
 
 | Command ID | Title (palette) | Where it appears |
 |---|---|---|
-| `bob-powertoys.showStatus` | IBM Bob - PowerToys: Show Status | Command palette |
-| `bob-powertoys.newTaskInWindow` | IBM Bob - PowerToys: New Task In Window | `bob-code.moreOptions` dropdown (the "..." button) |
-| `bob-powertoys.openTaskInWindow` | IBM Bob - PowerToys: Open Task In Window | Right-click inside Bob's webview (`webview/context`) |
-| `bob-powertoys.openTaskInEditor` | IBM Bob - PowerToys: Open Task In Editor | Right-click inside Bob's webview (`webview/context`) |
+| `bob-powertoys.showStatus` | IBM Bob PowerToys: Show Status | Command palette |
+| `bob-powertoys.newTaskInWindow` | IBM Bob PowerToys: New Task In Window | `bob-code.moreOptions` dropdown (the "..." button) |
+| `bob-powertoys.openTaskInWindow` | IBM Bob PowerToys: Open Task In Window | Right-click inside Bob's webview (`webview/context`) |
+| `bob-powertoys.openTaskInEditor` | IBM Bob PowerToys: Open Task In Editor | Right-click inside Bob's webview (`webview/context`) |
 
 > **Note:** "New Task In Editor" is intentionally absent - Bob already provides this action in its own "More Options" (`...`) menu, so we don't duplicate it.
 
@@ -697,18 +693,18 @@ npm run watch            # watch mode
 1. Edit source in `src/`
 2. `npm run compile` (or watch mode)
 3. Press `F5` to open Extension Development Host
-4. Open Bob's **Output** channel or the **Developer Tools** console (`Help -> Toggle Developer Tools`) to see `[Bob - PowerToys]` logs
+4. Open Bob's **Output** channel or the **Developer Tools** console (`Help -> Toggle Developer Tools`) to see `[Bob PowerToys]` logs
 
 ### Key debug log lines to watch for
 
 ```
-[Bob - PowerToys] Extension activating...
-[Bob - PowerToys] taskManager obtained via internal hack
-[Bob - PowerToys] webview sendMessage wrapped
-[Bob - PowerToys] setCurrentTasks intercepted, tasks: 1
-[Bob - PowerToys] Saving last task: <taskId>
-[Bob - PowerToys] Restoring last task: <taskId>
-[Bob - PowerToys] Successfully registered 29 tools with Bob
+[Bob PowerToys] Extension activating...
+[Bob PowerToys] taskManager obtained via internal hack
+[Bob PowerToys] webview sendMessage wrapped
+[Bob PowerToys] setCurrentTasks intercepted, tasks: 1
+[Bob PowerToys] Saving last task: <taskId>
+[Bob PowerToys] Restoring last task: <taskId>
+[Bob PowerToys] Successfully registered 29 tools with Bob
 ```
 
 ---
@@ -799,7 +795,7 @@ Bob evaluates `enabled?.(env) ?? true` at tool-list build time. A tool returning
 
 ### Extension doesn't activate
 - Check that IBM Bob (`IBM.bob-code`) is installed and active
-- Check Output panel for `[Bob - PowerToys]` errors
+- Check Output panel for `[Bob PowerToys]` errors
 
 ### Tools don't appear in Bob
 - Verify `registerSource` didn't throw (check Dev Tools console)

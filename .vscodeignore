@@ -1,6 +1,7 @@
 src/**
 .vscode/**
 .vscode-test/**
+.github/**
 .gitignore
 tsconfig.json
 **/*.map

@@ -15,7 +15,7 @@ const BOB_EXTENSION_ID = 'IBM.bob-code';
 let statusBarItem: vscode.StatusBarItem;
 
 export function activate(context: vscode.ExtensionContext) {
-  console.log('[Bob - PowerToys] Extension activating...');
+  console.log('[Bob PowerToys] Extension activating...');
 
   // Register terminal capture
   registerTerminalCapture(context);
@@ -25,7 +25,7 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.StatusBarAlignment.Right,
     100
   );
-  statusBarItem.text = '$(loading~spin) Bob - PowerToys';
+  statusBarItem.text = '$(loading~spin) Bob PowerToys';
   statusBarItem.command = 'bob-powertoys.showStatus';
   statusBarItem.show();
   context.subscriptions.push(statusBarItem);
@@ -33,7 +33,7 @@ export function activate(context: vscode.ExtensionContext) {
   // Activate Bob (no-op if already active), then register once it's ready
   const bobExtension = vscode.extensions.getExtension(BOB_EXTENSION_ID);
   if (!bobExtension) {
-    console.error('[Bob - PowerToys] Bob extension not found - tools will not be available');
+    console.error('[Bob PowerToys] Bob extension not found - tools will not be available');
     showStatusBarError();
   } else {
     bobExtension.activate().then(() => {
@@ -48,13 +48,30 @@ export function activate(context: vscode.ExtensionContext) {
     })
   );
 
+  // Register reload command — triggered from the status bar when in error state
+  context.subscriptions.push(
+    vscode.commands.registerCommand('bob-powertoys.reload', () => {
+      const ext = vscode.extensions.getExtension(BOB_EXTENSION_ID);
+      if (!ext) {
+        vscode.window.showErrorMessage('[Bob PowerToys] Bob extension not found — cannot reload.');
+        return;
+      }
+      statusBarItem.text = '$(loading~spin) Bob PowerToys';
+      statusBarItem.command = 'bob-powertoys.showStatus';
+      statusBarItem.tooltip = undefined;
+      ext.activate().then(() => {
+        registerPowerToys(context, ext.exports);
+      });
+    })
+  );
+
   // Register task window commands
   registerTaskCommands(context);
 }
 
 async function registerPowerToys(context: vscode.ExtensionContext, bobExports: any) {
   try {
-    console.log('[Bob - PowerToys] Registering taskManager...');
+    console.log('[Bob PowerToys] Registering taskManager...');
     await registerTaskManager(bobExports);
 
     // Persistence must be registered first so the openTask patch is in place
@@ -64,26 +81,26 @@ async function registerPowerToys(context: vscode.ExtensionContext, bobExports: a
     await restoreTasks(context);
 
     if (!bobExports?.registerSource) {
-      console.error('[Bob - PowerToys] Bob registerSource API not found');
-      console.log('[Bob - PowerToys] Available exports:', Object.keys(bobExports ?? {}));
+      console.error('[Bob PowerToys] Bob registerSource API not found');
+      console.log('[Bob PowerToys] Available exports:', Object.keys(bobExports ?? {}));
       return;
     }
 
     // Register centralized debug adapter tracker (captures debug output and notifies Bob)
-    console.log('[Bob - PowerToys] Registering centralized debug adapter tracker...');
+    console.log('[Bob PowerToys] Registering centralized debug adapter tracker...');
     context.subscriptions.push(registerDebugAdapterTracker(bobExports));
 
     // Register our tool source with Bob
-    console.log('[Bob - PowerToys] Registering tool source with Bob...');
-    const source = bobExports.registerSource('bob-powertoys', 'Bob - PowerToys');
+    console.log('[Bob PowerToys] Registering tool source with Bob...');
+    const source = bobExports.registerSource('bob-powertoys', 'Bob PowerToys');
 
     if (!source?.registerTool) {
-      console.error('[Bob - PowerToys] Source registerTool method not found');
+      console.error('[Bob PowerToys] Source registerTool method not found');
       return;
     }
 
     // Register all debugging tools
-    console.log('[Bob - PowerToys] Registering tools...');
+    console.log('[Bob PowerToys] Registering tools...');
     registerBreakpointTools(source);           // 3 tools
     registerDebugControlTools(source);         // 5 tools
     registerDebugConsoleTools(source);         // 6 tools
@@ -92,21 +109,25 @@ async function registerPowerToys(context: vscode.ExtensionContext, bobExports: a
     registerUniverseAnswerTool(source);        // 1 tool
     registerWorkspaceTools(source);            // 6 tools
 
-    console.log('[Bob - PowerToys] Successfully registered 30 tools with Bob');
-    console.log('[Bob - PowerToys] Automatic breakpoint notifications enabled');
+    console.log('[Bob PowerToys] Successfully registered 30 tools with Bob');
+    console.log('[Bob PowerToys] Automatic breakpoint notifications enabled');
 
     if (statusBarItem) {
-      statusBarItem.text = '$(debug-alt) Bob - PowerToys';
+      statusBarItem.text = '$(debug-alt) Bob PowerToys';
+      statusBarItem.command = 'bob-powertoys.showStatus';
+      statusBarItem.tooltip = undefined;
     }
   } catch (error) {
-    console.error('[Bob - PowerToys] Error registering tools:', error);
+    console.error('[Bob PowerToys] Error registering tools:', error);
     showStatusBarError();
   }
 }
 
 function showStatusBarError() {
   if (statusBarItem) {
-    statusBarItem.text = '$(error) Bob - PowerToys';
+    statusBarItem.text = '$(error) Bob PowerToys';
+    statusBarItem.command = 'bob-powertoys.reload';
+    statusBarItem.tooltip = 'Bob PowerToys failed to load — click to retry';
   }
 }
 
@@ -115,7 +136,7 @@ function showStatus() {
   const sessionName = activeSession ? activeSession.name : 'None';
 
   const status = [
-    'IBM Bob - PowerToys:',
+    'IBM Bob PowerToys:',
     '- Total Tools Registered: 30',
     '- Automatic Breakpoint Notifications: Enabled',
     '- Active Debug Session: ' + sessionName,
@@ -131,5 +152,5 @@ function showStatus() {
 
 export function deactivate() {
   statusBarItem?.dispose();
-  console.log('[Bob - PowerToys] Extension deactivated');
+  console.log('[Bob PowerToys] Extension deactivated');
 }

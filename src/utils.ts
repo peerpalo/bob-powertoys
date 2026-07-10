@@ -59,17 +59,17 @@ export async function registerTaskManager(bobExports: any): Promise<void> {
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     const taskManager = bobExports?.taskManager ?? extractTaskManager(bobExports);
     if (taskManager != null) {
-      console.log('[Bob - PowerToys] taskManager obtained' + (bobExports?.taskManager ? ' via public API' : ' via internal hack') + (attempt > 1 ? ` (attempt ${attempt})` : ''));
+      console.log('[Bob PowerToys] taskManager obtained' + (bobExports?.taskManager ? ' via public API' : ' via internal hack') + (attempt > 1 ? ` (attempt ${attempt})` : ''));
       _cachedTaskManager = taskManager;
       return;
     }
     if (attempt < MAX_ATTEMPTS) {
-      console.warn(`[Bob - PowerToys] taskManager not available yet, retrying in ${DELAY_MS}ms (attempt ${attempt}/${MAX_ATTEMPTS})...`);
+      console.warn(`[Bob PowerToys] taskManager not available yet, retrying in ${DELAY_MS}ms (attempt ${attempt}/${MAX_ATTEMPTS})...`);
       await new Promise(resolve => setTimeout(resolve, DELAY_MS));
     }
   }
 
-  throw new Error('[Bob - PowerToys] taskManager not available after all retries: Bob may have changed its internals');
+  throw new Error('[Bob PowerToys] taskManager not available after all retries: Bob may have changed its internals');
 }
 
 /**

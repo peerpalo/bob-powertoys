@@ -117,7 +117,7 @@ function wrapWebviewSendMessage(context: vscode.ExtensionContext, chatManager: a
     try {
       if (msg?.type === 'setCurrentTasks') {
         const hasTasks = (msg.tasks?.length ?? 0) > 0;
-        console.log('[Bob - PowerToys] setCurrentTasks intercepted (isPanel=%s), tasks:', isPanel, msg.tasks?.length ?? 0);
+        console.log('[Bob PowerToys] setCurrentTasks intercepted (isPanel=%s), tasks:', isPanel, msg.tasks?.length ?? 0);
         if (!isPanel || hasTasks) {
           saveTasks(context, chatManager, isPanel);
         }
@@ -135,7 +135,7 @@ function wrapWebviewSendMessage(context: vscode.ExtensionContext, chatManager: a
   }
 
   wrappedWebviews.add(wv);
-  console.log('[Bob - PowerToys] webview sendMessage wrapped (isPanel=%s)', isPanel);
+  console.log('[Bob PowerToys] webview sendMessage wrapped (isPanel=%s)', isPanel);
   return true;
 }
 
@@ -149,7 +149,7 @@ export function registerTaskPersistence(context: vscode.ExtensionContext): void 
   const chatManager = taskManager?.getTopLevelChatManager?.();
   
   if (!chatManager) {
-    console.warn('[Bob - PowerToys] no chatManager: last task save disabled');
+    console.warn('[Bob PowerToys] no chatManager: last task save disabled');
   } else {
     wrapWebviewSendMessage(context, chatManager, false);
   }
@@ -157,7 +157,7 @@ export function registerTaskPersistence(context: vscode.ExtensionContext): void 
   // Tab chatManagers are created at runtime inside openTask. Patch it so we
   // can wrap each new tab webview the moment Bob hands it back.
   if (!taskManager || typeof taskManager.openTask !== 'function') {
-    console.warn('[Bob - PowerToys] taskManager.openTask not found: tab task tracking disabled');
+    console.warn('[Bob PowerToys] taskManager.openTask not found: tab task tracking disabled');
     return;
   }
   if (taskManager.__bobPowerToysPatched) { return; } // idempotent
@@ -175,7 +175,7 @@ export function registerTaskPersistence(context: vscode.ExtensionContext): void 
     return result;
   };
 
-  console.log('[Bob - PowerToys] taskManager.openTask patched for tab tracking');
+  console.log('[Bob PowerToys] taskManager.openTask patched for tab tracking');
 }
 
 /**
@@ -192,11 +192,11 @@ export async function restoreTasks(context: vscode.ExtensionContext): Promise<vo
   if (lastTaskId) {
     lastSidebarTaskId = lastTaskId;
     vscode.commands.executeCommand('setContext', HAS_LAST_SIDEBAR_TASK_CTX, true);
-    console.log(`[Bob - PowerToys] Restoring last sidebar task: ${lastTaskId}`);
+    console.log(`[Bob PowerToys] Restoring last sidebar task: ${lastTaskId}`);
     try {
       await taskManager.openTask({ taskId: lastTaskId });
     } catch {
-      console.warn(`[Bob - PowerToys] Could not restore sidebar task ${lastTaskId}: it may have been deleted`);
+      console.warn(`[Bob PowerToys] Could not restore sidebar task ${lastTaskId}: it may have been deleted`);
       lastSidebarTaskId = undefined;
       vscode.commands.executeCommand('setContext', HAS_LAST_SIDEBAR_TASK_CTX, false);
       await context.globalState.update(sidebarKey(), undefined);
@@ -214,13 +214,13 @@ export async function restoreTasks(context: vscode.ExtensionContext): Promise<vo
   if (entries.length === 0 && !lastTaskId) {
     // This window has nothing to restore - it was reopened blank by VSCode's
     // window restore. Close it so it doesn't linger as an empty window.
-    console.log('[Bob - PowerToys] Nothing to restore for this window');
+    console.log('[Bob PowerToys] Nothing to restore for this window');
     return;
   }
 
   const surviving: TabEntry[] = [];
   for (const entry of entries) {
-    console.log(`[Bob - PowerToys] Restoring tab task: ${entry.taskId} col:${entry.viewColumn} (window: ${currentKey})`);
+    console.log(`[Bob PowerToys] Restoring tab task: ${entry.taskId} col:${entry.viewColumn} (window: ${currentKey})`);
     try {
       const chatManager = await taskManager.openTaskInNewTab(entry.taskId);
       // Reveal the panel in its original column within this window.
@@ -228,7 +228,7 @@ export async function restoreTasks(context: vscode.ExtensionContext): Promise<vo
       panel?.reveal(entry.viewColumn, true);
       surviving.push(entry);
     } catch {
-      console.warn(`[Bob - PowerToys] Could not restore tab task ${entry.taskId}: it may have been deleted`);
+      console.warn(`[Bob PowerToys] Could not restore tab task ${entry.taskId}: it may have been deleted`);
     }
   }
 
@@ -252,7 +252,7 @@ async function saveTasks(context: vscode.ExtensionContext, chatManager: any, isP
       ? topLevelChatManager.getTaskId?.()
       : undefined;
 
-    console.log(`[Bob - PowerToys] Saving last sidebar task: ${lastSidebarTaskId}`);
+    console.log(`[Bob PowerToys] Saving last sidebar task: ${lastSidebarTaskId}`);
     vscode.commands.executeCommand('setContext', HAS_LAST_SIDEBAR_TASK_CTX, !!lastSidebarTaskId);
     await context.globalState.update(sidebarKey(), lastSidebarTaskId);
   } else {
@@ -275,7 +275,7 @@ async function saveTasks(context: vscode.ExtensionContext, chatManager: any, isP
       ? current.map((e, i) => i === existing ? entry : e)
       : [...current, entry];
 
-    console.log(`[Bob - PowerToys] Saving tab task: ${taskId} col:${viewColumn} (window: ${wsKey}, total: ${updated.length})`);
+    console.log(`[Bob PowerToys] Saving tab task: ${taskId} col:${viewColumn} (window: ${wsKey}, total: ${updated.length})`);
     await context.globalState.update(tabsKey(), { ...all, [wsKey]: updated });
   }
 }
@@ -290,7 +290,7 @@ async function removeTabTask(context: vscode.ExtensionContext, taskId: string): 
   const filtered = current.filter(e => e.taskId !== taskId);
   if (filtered.length === current.length) { return; }
 
-  console.log(`[Bob - PowerToys] Removing tab task: ${taskId} (window: ${wsKey}, remaining: ${filtered.length})`);
+  console.log(`[Bob PowerToys] Removing tab task: ${taskId} (window: ${wsKey}, remaining: ${filtered.length})`);
   const updated: TabsStore = { ...all, [wsKey]: filtered };
   if (filtered.length === 0) { delete updated[wsKey]; }
   await context.globalState.update(tabsKey(), Object.keys(updated).length > 0 ? updated : undefined);
