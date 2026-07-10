@@ -7,6 +7,10 @@ on:
         description: 'Skip the publish job (build and test only)'
         type: boolean
         default: false
+      publish_ovsx:
+        description: 'Publish to Open VSX'
+        type: boolean
+        default: false
 
 env:
   NODE_VERSION: '24'
@@ -24,6 +28,8 @@ jobs:
     outputs:
       version: ${{ steps.get-version.outputs.version }}
       package-name: ${{ steps.get-version.outputs.package-name }}
+      tag-exists: ${{ steps.get-version.outputs.tag-exists }}
+      vsix-filename: ${{ steps.package.outputs.vsix-filename }}
     
     steps:
       - name: Checkout code
@@ -49,9 +55,21 @@ jobs:
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "package-name=$PACKAGE_NAME" >> $GITHUB_OUTPUT
           echo "Building version: $VERSION"
+          if git ls-remote --tags origin "refs/tags/v$VERSION" | grep -q .; then
+            echo "tag-exists=true" >> $GITHUB_OUTPUT
+            echo "Tag v$VERSION already exists — will skip GitHub Release"
+          else
+            echo "tag-exists=false" >> $GITHUB_OUTPUT
+            echo "Tag v$VERSION does not exist — will create GitHub Release"
+          fi
       
       - name: Package extension
-        run: npx @vscode/vsce package
+        id: package
+        run: |
+          npx @vscode/vsce package
+          VSIX_FILENAME=$(ls *.vsix)
+          echo "vsix-filename=$VSIX_FILENAME" >> $GITHUB_OUTPUT
+          echo "Packaged: $VSIX_FILENAME"
       
       - name: Upload VSIX artifact
         uses: actions/upload-artifact@v6
@@ -115,6 +133,7 @@ jobs:
           name: vsix-package
       
       - name: Create and push tag
+        if: ${{ needs.build.outputs.tag-exists == 'false' }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -122,6 +141,7 @@ jobs:
           git push origin v${{ needs.build.outputs.version }}
       
       - name: Create GitHub Release
+        if: ${{ needs.build.outputs.tag-exists == 'false' }}
         uses: ncipollo/release-action@v1
         with:
           artifacts: "*.vsix"
@@ -133,4 +153,5 @@ jobs:
           commit: ${{ github.sha }}
       
       - name: Publish to Open VSX
-        run: npx -y ovsx publish --pat ${{ secrets.OVSX_PAT }}
+        if: ${{ inputs.publish_ovsx }}
+        run: npx -y ovsx publish ${{ needs.build.outputs.vsix-filename }} --pat ${{ secrets.OVSX_PAT }}
