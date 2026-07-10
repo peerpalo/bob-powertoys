@@ -103,6 +103,12 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v5
       
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+      
       - name: Download VSIX artifact
         uses: actions/download-artifact@v7
         with:
@@ -125,3 +131,6 @@ jobs:
           tag: v${{ needs.build.outputs.version }}
           name: ${{ needs.build.outputs.package-name }} v${{ needs.build.outputs.version }}
           commit: ${{ github.sha }}
+      
+      - name: Publish to Open VSX
+        run: npx -y ovsx publish --pat ${{ secrets.OVSX_PAT }}

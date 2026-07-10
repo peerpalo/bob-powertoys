@@ -55,7 +55,7 @@ async function safeNotify(chatManager: any, ownerTaskId: string, message: string
 
     return true;
   } catch (error) {
-    console.error('[Bob - PowerToys] safeNotify failed:', error);
+    console.error('[Bob PowerToys] safeNotify failed:', error);
     return false;
   }
 }
@@ -84,25 +84,25 @@ async function notifyBobOfBreakpointHit(
     }
 
     if (!bobExportsRef) {
-      console.log('[Bob - PowerToys] No Bob exports available');
+      console.log('[Bob PowerToys] No Bob exports available');
       return false;
     }
 
     const taskManager = getTaskManager();
     if (!taskManager) {
-      console.log('[Bob - PowerToys] No taskManager access');
+      console.log('[Bob PowerToys] No taskManager access');
       return false;
     }
 
     if (!ownerTaskId) {
-      console.log('[Bob - PowerToys] No task owns this breakpoint - was it set outside Bob?');
+      console.log('[Bob PowerToys] No task owns this breakpoint - was it set outside Bob?');
       return false;
     }
 
     // Escalating lookup: active first, then backgrounded
     const chatManager = findTaskChatManager(taskManager, ownerTaskId);
     if (!chatManager) {
-      console.log(`[Bob - PowerToys] Task ${ownerTaskId} not reachable (active or backgrounded)`);
+      console.log(`[Bob PowerToys] Task ${ownerTaskId} not reachable (active or backgrounded)`);
       return false;
     }
 
@@ -114,14 +114,14 @@ async function notifyBobOfBreakpointHit(
       (chatManager.currentTask?.getId?.() === ownerTaskId ? chatManager.currentTask : undefined);
 
     if (!task) {
-      console.log('[Bob - PowerToys] Owning task no longer present on its manager');
+      console.log('[Bob PowerToys] Owning task no longer present on its manager');
       return false;
     }
 
     const message = `Breakpoint hit at ${info.file}:${info.line}`;
     return await safeNotify(chatManager, ownerTaskId, message);
   } catch (error) {
-    console.error('[Bob - PowerToys] Error notifying Bob:', error);
+    console.error('[Bob PowerToys] Error notifying Bob:', error);
     return false;
   }
 }
@@ -190,7 +190,7 @@ export function registerDebugAdapterTracker(bobExports: any): vscode.Disposable 
                   currentStoppedState.frameId = stack.stackFrames[0].id;
                 }
               } catch (error) {
-                console.error('[Bob - PowerToys] Error resolving frame ID:', error);
+                console.error('[Bob PowerToys] Error resolving frame ID:', error);
               }
             })();
 
@@ -224,7 +224,7 @@ export function registerDebugAdapterTracker(bobExports: any): vscode.Disposable 
                     output: getRecentDebugOutput(20),
                   });
                 } catch (error) {
-                  console.error('[Bob - PowerToys] Error processing breakpoint hit:', error);
+                  console.error('[Bob PowerToys] Error processing breakpoint hit:', error);
                 }
               })();
             }
