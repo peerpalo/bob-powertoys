@@ -227,7 +227,7 @@ export class ReadWorkspaceFileTool {
     {
       name: 'range',
       type: 'string',
-      description: 'Optional line range to return, format "start-end" (1-based, inclusive). E.g. "10-50". Omit to return the full file.',
+      description: 'One or more line range elements in format "start-end" (1-based, inclusive)',
       detail: 'Line range "start-end" (optional)',
       required: false,
       usage: '1-100',
@@ -238,12 +238,13 @@ export class ReadWorkspaceFileTool {
   getParameters(_env?: any): any[] { return ReadWorkspaceFileTool.PARAMS; }
 
   getLabels(args: Record<string, any>) {
-    const p = args?.path ?? '';
+    const p = args?.path ? ` ${args.path}` : '';
+    const r = args?.range ? ` (${args.range})` : '';
     return {
-      displayName: `Read: ${path.basename(p)}`,
-      running: `Reading ${args?.workspace ?? ''}/${p}...`,
-      success: `Read ${p}`,
-      error: `Failed to read ${p}`,
+      displayName: `Read File${p}${r}`,
+      running: `Reading file${p}${r}`,
+      success: `Read file${p}${r}`,
+      error: `Failed to read file${p}${r}`,
     };
   }
 
@@ -281,13 +282,27 @@ export class ReadWorkspaceFileTool {
     let endLine = allLines.length;
 
     if (range) {
-      const m = /^(\d+)-(\d+)$/.exec(range.trim());
-      if (!m) {
-        context.pushError(JSON.stringify({ error: `Invalid range "${range}". Expected format: "start-end" e.g. "10-50".` }));
+      // Same split logic as Bob's built-in read_file: split on either '-' or ','
+      const parts = range.split(/[-,]/).map(s => s.trim());
+      if (parts.length !== 2 || parts.some(p => p === '')) {
+        context.pushError(JSON.stringify({ error: `Invalid range format: "${range}". Use format "start-end" or "start,end" (e.g., "1-50")` }));
         return;
       }
-      startLine = Math.max(1, parseInt(m[1], 10));
-      endLine = Math.min(allLines.length, parseInt(m[2], 10));
+      const [s, e] = parts.map(Number);
+      if (isNaN(s) || isNaN(e)) {
+        context.pushError(JSON.stringify({ error: 'Invalid range: both start and end must be numbers' }));
+        return;
+      }
+      if (s < 1) {
+        context.pushError(JSON.stringify({ error: 'Invalid range: start line must be >= 1' }));
+        return;
+      }
+      if (e < s) {
+        context.pushError(JSON.stringify({ error: `Invalid range: end line (${e}) must be >= start line (${s})` }));
+        return;
+      }
+      startLine = s;
+      endLine = Math.min(allLines.length, e);
     }
 
     // Build numbered output (same style as Bob's built-in read_file)
@@ -919,12 +934,12 @@ export class WriteWorkspaceFileTool {
   getParameters(_env?: any): any[] { return WriteWorkspaceFileTool.PARAMS; }
 
   getLabels(args: Record<string, any>) {
-    const p = args?.path ?? '';
+    const p = args?.path ? ` ${args.path}` : '';
     return {
-      displayName: `Write: ${path.basename(p)}`,
-      running: `Writing ${p}...`,
-      success: `Wrote ${p}`,
-      error: `Failed to write ${p}`,
+      displayName: `Write File${p}`,
+      running: `Writing file${p}`,
+      success: `Wrote file${p}`,
+      error: `Failed to write file${p}`,
     };
   }
 
