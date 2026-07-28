@@ -125,16 +125,45 @@ The `Source` object returned by `registerSource` exposes:
 
 ```typescript
 source.registerTool(tool: Tool): void
+source.isEntitled(): boolean                      // true when Bob is logged in and has a valid entitlement
+source.onEntitlementChange(cb: () => void): void  // fires when login/logout changes entitlement state
 source.onTurnStart(cb: (taskId: string, envs: any, isEmpty: boolean) => void): void
 source.onTurnEnd(cb: () => void): void
 source.onToolWillExecute(cb): void
 source.onToolExecution(cb): void
 source.onToolDidExecute(cb): void
-source.onEntitlementChange(cb): void
 source.onCommandWillExecute(cb): void
 ```
 
 **`taskManager` is NOT on the public exports.** It must be extracted via internal hack (see below).
+
+### Login-deferred registration
+
+When Bob is not yet logged in, `registerTaskManager` throws because Bob's chat panel hasn't rendered yet (no chat managers exist to extract the taskManager from). `registerPowerToys` catches this and arms a one-shot auth-change listener as the retry trigger.
+
+The preferred listener is Bob's **internal** `onAuthChange` — the same event `ChatManager` subscribes to. It is extracted via `extractOnAuthChange(source)`. If that hack breaks, it falls back to `source.onEntitlementChange`.
+
+```typescript
+try {
+  await registerTaskManager(bobExports);
+} catch {
+  const onAuthChange = extractOnAuthChange(source);
+  const retryFn = onAuthChange ?? source.onEntitlementChange.bind(source);
+  let fired = false;
+  retryFn(() => {
+    if (fired) { return; }
+    fired = true;
+    registerPowerToys(context, bobExports);
+  });
+  return;
+}
+```
+
+Key points:
+- `source.onEntitlementChange` fires reliably on login — confirmed by testing.
+- `source.isEntitled()` reflects **entitlement/subscription** state, not login state — do not use it as a login gate.
+- The `fired` local variable makes the listener one-shot, preventing duplicate registration if the event fires more than once.
+- `vscode.extensions.onDidChange` is **not** suitable — it fires for extension installs/removals, not Bob's internal auth state.
 
 ---
 
