@@ -11,6 +11,8 @@ import { registerTaskManager, EXTENSION_ID, EXTENSION_DISPLAY_NAME, logger } fro
 import { registerTaskCommands, registerTaskPersistence, restoreTasks } from './taskManager.js';
 
 const BOB_EXTENSION_ID = 'IBM.bob-code';
+const SHOW_STATUS_COMMAND = `${EXTENSION_ID}.showStatus`;
+const RELOAD_COMMAND = `${EXTENSION_ID}.reload`;
 
 let statusBarItem: vscode.StatusBarItem;
 
@@ -26,7 +28,7 @@ export function activate(context: vscode.ExtensionContext) {
     100
   );
   statusBarItem.text = `$(loading~spin) ${EXTENSION_DISPLAY_NAME}`;
-  statusBarItem.command = `${EXTENSION_ID}.showStatus`;
+  statusBarItem.command = SHOW_STATUS_COMMAND;
   statusBarItem.show();
   context.subscriptions.push(statusBarItem);
 
@@ -43,24 +45,24 @@ export function activate(context: vscode.ExtensionContext) {
 
   // Register status command
   context.subscriptions.push(
-    vscode.commands.registerCommand(`${EXTENSION_ID}.showStatus`, () => {
+    vscode.commands.registerCommand(SHOW_STATUS_COMMAND, () => {
       showStatus();
     })
   );
 
   // Register reload command — triggered from the status bar when in error state
   context.subscriptions.push(
-    vscode.commands.registerCommand(`${EXTENSION_ID}.reload`, () => {
-      const ext = vscode.extensions.getExtension(BOB_EXTENSION_ID);
-      if (!ext) {
+    vscode.commands.registerCommand(RELOAD_COMMAND, () => {
+      const bobExtension = vscode.extensions.getExtension(BOB_EXTENSION_ID);
+      if (!bobExtension) {
         vscode.window.showErrorMessage(`[${EXTENSION_DISPLAY_NAME}] Bob extension not found — cannot reload.`);
         return;
       }
       statusBarItem.text = `$(loading~spin) ${EXTENSION_DISPLAY_NAME}`;
-      statusBarItem.command = `${EXTENSION_ID}.showStatus`;
+      statusBarItem.command = SHOW_STATUS_COMMAND;
       statusBarItem.tooltip = undefined;
-      ext.activate().then(() => {
-        registerPowerToys(context, ext.exports);
+      bobExtension.activate().then(() => {
+        registerPowerToys(context, bobExtension.exports);
       });
     })
   );
@@ -71,36 +73,46 @@ export function activate(context: vscode.ExtensionContext) {
 
 async function registerPowerToys(context: vscode.ExtensionContext, bobExports: any) {
   try {
-    logger.log('Registering taskManager...');
-    await registerTaskManager(bobExports);
-
-    // Persistence must be registered first so the openTask patch is in place
-    // before restoreTasks calls openTaskInNewTab - otherwise the onDispose hooks
-    // for restored tabs would never be registered.
-    registerTaskPersistence(context);
-    await restoreTasks(context);
-
     if (!bobExports?.registerSource) {
       logger.error('Bob registerSource API not found');
-      logger.log('Available exports:', Object.keys(bobExports ?? {}));
+      showStatusBarError();
       return;
     }
 
-    // Register centralized debug adapter tracker (captures debug output and notifies Bob)
-    logger.log('Registering centralized debug adapter tracker...');
-    context.subscriptions.push(registerDebugAdapterTracker(bobExports));
-
-    // Register our tool source with Bob
-    logger.log('Registering tool source with Bob...');
     const source = bobExports.registerSource(EXTENSION_ID, EXTENSION_DISPLAY_NAME);
 
     if (!source?.registerTool) {
       logger.error('Source registerTool method not found');
+      showStatusBarError();
       return;
     }
 
-    // Register all debugging tools
-    logger.log('Registering tools...');
+    // registerTaskManager fails when Bob's chat panel hasn't rendered yet,
+    // which happens when the user isn't logged in yet. Re-run once Bob fires
+    // onEntitlementChange (confirmed to fire on login).
+    try {
+      await registerTaskManager(bobExports);
+    } catch {
+      logger.warn('Bob not ready (not logged in?) — waiting for auth change...');
+      showStatusBarError();
+
+      let fired = false;
+      source.onEntitlementChange(() => {
+        if (fired) { return; }
+        fired = true;
+        registerPowerToys(context, bobExports);
+      });
+      return;
+    }
+
+    // Persistence must be registered before restoreTasks so the openTask patch
+    // is in place before any openTaskInNewTab calls.
+    registerTaskPersistence(context);
+    await restoreTasks(context);
+
+    context.subscriptions.push(registerDebugAdapterTracker(bobExports));
+    logger.log('Automatic breakpoint notifications enabled');
+
     registerBreakpointTools(source);           // 3 tools
     registerDebugControlTools(source);         // 5 tools
     registerDebugConsoleTools(source);         // 6 tools
@@ -108,13 +120,11 @@ async function registerPowerToys(context: vscode.ExtensionContext, bobExports: a
     registerTerminalConsoleTools(source);      // 4 tools
     registerUniverseAnswerTool(source);        // 1 tool
     registerWorkspaceTools(source);            // 6 tools
-
     logger.log('Successfully registered 30 tools with Bob');
-    logger.log('Automatic breakpoint notifications enabled');
 
     if (statusBarItem) {
       statusBarItem.text = `$(debug-alt) ${EXTENSION_DISPLAY_NAME}`;
-      statusBarItem.command = `${EXTENSION_ID}.showStatus`;
+      statusBarItem.command = SHOW_STATUS_COMMAND;
       statusBarItem.tooltip = undefined;
     }
   } catch (error) {
@@ -126,7 +136,7 @@ async function registerPowerToys(context: vscode.ExtensionContext, bobExports: a
 function showStatusBarError() {
   if (statusBarItem) {
     statusBarItem.text = `$(error) ${EXTENSION_DISPLAY_NAME}`;
-    statusBarItem.command = `${EXTENSION_ID}.reload`;
+    statusBarItem.command = RELOAD_COMMAND;
     statusBarItem.tooltip = `${EXTENSION_DISPLAY_NAME} failed to load — click to retry`;
   }
 }
