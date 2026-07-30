@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       dry_run:
-        description: 'Skip the publish job (build and test only)'
+        description: 'Skip the publish job (test and build only)'
         type: boolean
         default: false
       publish_ovsx:
@@ -19,7 +19,29 @@ permissions:
   contents: read
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+      
+      - name: Install dependencies
+        run: npm ci
+      
+      - name: Run tests
+        run: npm test
+
   build:
+    needs: test
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -77,37 +99,6 @@ jobs:
           name: vsix-package
           path: '*.vsix'
           retention-days: 5
-
-  test:
-    needs: build
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      actions: read
-    
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v5
-      
-      - name: Setup Node.js
-        uses: actions/setup-node@v5
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-          cache: 'npm'
-      
-      - name: Install dependencies
-        run: npm ci
-      
-      - name: Download VSIX artifact
-        uses: actions/download-artifact@v7
-        with:
-          name: vsix-package
-      
-      - name: Verify VSIX package
-        run: |
-          echo "Verifying VSIX package..."
-          ls -lh *.vsix
-          unzip -l *.vsix | head -20
 
   publish:
     needs: [build, test]
