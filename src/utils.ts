@@ -280,6 +280,24 @@ export async function buildIgnoreFileArgs(
 }
 
 /**
+ * Normalise a user-supplied relative path for use with vscode.Uri.joinPath.
+ * - Converts backslashes to forward slashes
+ * - Strips a leading "./" (current-directory prefix)
+ * - Strips a bare leading "/" (accidental absolute prefix)
+ * - Collapses a lone "." to "" so the caller falls back to the folder root
+ *
+ * Deliberately does NOT strip a leading "." that is followed by a non-slash
+ * character, so dotfolders like ".bob", ".idea", ".git" are preserved intact.
+ */
+export function normaliseWorkspacePath(filePath: string): string {
+  return filePath
+    .replace(/\\/g, '/')   // backslash → forward slash
+    .replace(/^\.\//, '')  // strip leading "./"
+    .replace(/^\//, '')    // strip leading "/"
+    .replace(/^\.$/, '');  // collapse lone "." → "" (folder root)
+}
+
+/**
  * Resolve a frame ID for debug operations.
  * If the provided frameId is undefined, null, or <= 0, resolves to the top frame.
  *

@@ -12,7 +12,7 @@
 
 import * as vscode from 'vscode';
 import * as path from 'path';
-import { getTaskManager, findTaskChatManager, resolveRipGrepBinary, spawnRipGrep, statMtimes, ripGrepFiles, buildIgnoreFileArgs, RG_FIELD_SEP, getApplyDiffTool } from '../utils.js';
+import { getTaskManager, findTaskChatManager, resolveRipGrepBinary, spawnRipGrep, statMtimes, ripGrepFiles, buildIgnoreFileArgs, RG_FIELD_SEP, getApplyDiffTool, normaliseWorkspacePath } from '../utils.js';
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -49,7 +49,7 @@ function resolveInFolder(
     return { error: `Unknown workspace folder "${folderName}". Available folders: ${names}` };
   }
 
-  const rel = filePath.replace(/\\/g, '/').replace(/^\.?\/?/, '');
+  const rel = normaliseWorkspacePath(filePath);
   const uri = rel ? vscode.Uri.joinPath(folder.uri, rel) : folder.uri;
   return { uri };
 }
