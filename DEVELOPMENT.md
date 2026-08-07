@@ -139,31 +139,46 @@ source.onCommandWillExecute(cb): void
 
 ### Login-deferred registration
 
-When Bob is not yet logged in, `registerTaskManager` throws because Bob's chat panel hasn't rendered yet (no chat managers exist to extract the taskManager from). `registerPowerToys` catches this and arms a one-shot auth-change listener as the retry trigger.
+The registration flow is split into two phases:
 
-The preferred listener is Bob's **internal** `onAuthChange` — the same event `ChatManager` subscribes to. It is extracted via `extractOnAuthChange(source)`. If that hack breaks, it falls back to `source.onEntitlementChange`.
+1. **Always runs** (`registerPowerToys`): `registerSource` + `registerTool` calls. These always succeed regardless of login state because Bob's `BobSourceRegistry` accepts sources unconditionally.
+
+2. **Login-dependent** (`completeRegisterPowerToys`): `registerTaskManager`, `registerTaskPersistence`, `restoreTasks`, debug adapter tracker. These require Bob to be logged in (chat panel must exist).
+
+If Bob is not yet logged in when the extension activates, `registerTaskManager` throws. `completeRegisterPowerToys` catches this and arms a one-shot `source.onEntitlementChange` listener to retry:
 
 ```typescript
+// Phase 1 — always works
+const source = bobExports.registerSource(EXTENSION_ID, EXTENSION_DISPLAY_NAME);
+registerBreakpointTools(source);
+// ... all other registerXxxTools calls ...
+
+// Phase 2 — login-dependent
+await completeRegisterPowerToys(context, bobExports, source);
+
+// inside completeRegisterPowerToys:
 try {
   await registerTaskManager(bobExports);
 } catch {
-  const onAuthChange = extractOnAuthChange(source);
-  const retryFn = onAuthChange ?? source.onEntitlementChange.bind(source);
+  // Bob not logged in yet — retry when entitlements are re-evaluated on login
   let fired = false;
-  retryFn(() => {
+  const disposable = source.onEntitlementChange(() => {
     if (fired) { return; }
     fired = true;
-    registerPowerToys(context, bobExports);
+    disposable.dispose();
+    completeRegisterPowerToys(context, bobExports, source);
   });
+  context.subscriptions.push(disposable);
   return;
 }
 ```
 
 Key points:
-- `source.onEntitlementChange` fires reliably on login — confirmed by testing.
-- `source.isEntitled()` reflects **entitlement/subscription** state, not login state — do not use it as a login gate.
-- The `fired` local variable makes the listener one-shot, preventing duplicate registration if the event fires more than once.
-- `vscode.extensions.onDidChange` is **not** suitable — it fires for extension installs/removals, not Bob's internal auth state.
+- `source.onEntitlementChange` fires when Bob logs in and re-evaluates entitlements — confirmed by testing. It fires even though our source is not a paid addon; Bob's `AddonManager.triggerEntitlementChange()` iterates all enabled sources in the registry.
+- `registerSource` and `registerTool` must happen **before** `completeRegisterPowerToys` so that our source is already in the registry (and thus receives `onEntitlementChange`) when Bob later logs in.
+- The `fired` guard makes the listener one-shot, preventing duplicate setup if the event fires more than once.
+- `source.isEntitled()` reflects **subscription** state, not login state — do not use it as a login gate.
+- `vscode.authentication.onDidChangeSessions` was previously used as the retry hook but is incorrect — it is a VS Code-level auth event, not tied to Bob's internal session state.
 
 ---
 
@@ -505,7 +520,8 @@ Controls when Bob is automatically notified about breakpoint hits.
 
 **Key functions**:
 - `activate(context)` - entry point; registers status bar, waits for Bob, calls `registerTaskCommands`
-- `registerPowerToys(context, bobExports)` - awaits `registerTaskManager`, then `registerTaskPersistence` + `restoreTasks`, then registers debug tracker and all 32 tools
+- `registerPowerToys(context, bobExports)` - phase 1: calls `registerSource` then all `registerXxxTools`; always succeeds regardless of login state
+- `completeRegisterPowerToys(context, bobExports, source)` - phase 2: calls `registerTaskManager`, `registerTaskPersistence`, `restoreTasks`, debug adapter tracker; retries via `source.onEntitlementChange` if Bob is not yet logged in
 - `showStatus()` / `showStatusBarError()` - status bar management
 
 ### 2. taskManager.ts
