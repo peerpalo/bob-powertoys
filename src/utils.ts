@@ -63,7 +63,7 @@ export function extractTaskManager(bobExports: any): any {
  * Throws if all attempts fail.
  */
 export async function registerTaskManager(bobExports: any): Promise<void> {
-  const MAX_ATTEMPTS = 3;
+  const MAX_ATTEMPTS = 10;
   const DELAY_MS = 1000;
 
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
