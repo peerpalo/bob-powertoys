@@ -222,10 +222,19 @@ export async function restoreTasks(context: vscode.ExtensionContext): Promise<vo
   for (const entry of entries) {
     logger.log(`Restoring tab task: ${entry.taskId} col:${entry.viewColumn} (window: ${currentKey})`);
     try {
-      const chatManager = await taskManager.openTaskInNewTab(entry.taskId);
-      // Reveal the panel in its original column within this window.
-      const panel: vscode.WebviewPanel | undefined = chatManager?._webview?.view ?? chatManager?.view?.view;
-      panel?.reveal(entry.viewColumn, true);
+      // Use openTask directly so we can pass onReady, which fires after
+      // createPanel() — meaning the WebviewPanel physically exists and is
+      // attached to the chatManager before we call reveal(). Without this,
+      // reveal() races against panel creation and can produce a black screen
+      // when restoring to a column that isn't currently open.
+      await taskManager.openTask({
+        taskId: entry.taskId,
+        location: 'newTab',
+        onReady: (cm: any) => {
+          const panel: vscode.WebviewPanel | undefined = cm?._webview?.view ?? cm?.view?.view;
+          panel?.reveal(entry.viewColumn, true);
+        },
+      });
       surviving.push(entry);
     } catch {
       logger.warn(`Could not restore tab task ${entry.taskId}: it may have been deleted`);

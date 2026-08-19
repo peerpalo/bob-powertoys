@@ -16,8 +16,34 @@ const RELOAD_COMMAND = `${EXTENSION_ID}.reload`;
 
 let statusBarItem: vscode.StatusBarItem;
 
+/**
+ * Derives a migration flag key from a version string, e.g. "0.6.9" → "bob-powertoys.migration.069.done".
+ * Bump the `WIPE_BEFORE_VERSION` constant below to schedule a new wipe on the next release.
+ */
+function migrationKey(version: string): string {
+  return `${EXTENSION_ID}.migration.${version.replace(/\./g, '')}.done`;
+}
+
+/**
+ * One-time wipe of all globalState keys for every installed version that is
+ * older than WIPE_BEFORE_VERSION (inclusive). Once the flag is set it never
+ * runs again, regardless of what the current package version is.
+ */
+async function migrateGlobalState(context: vscode.ExtensionContext): Promise<void> {
+  const WIPE_BEFORE_VERSION = '0.7.0';
+  const flagKey = migrationKey(WIPE_BEFORE_VERSION);
+  if (context.globalState.get<boolean>(flagKey)) { return; }
+
+  const currentVersion: string = context.extension.packageJSON.version ?? 'unknown';
+  const keys = context.globalState.keys();
+  logger.log(`globalState migration (current: v${currentVersion}, wipe threshold: v${WIPE_BEFORE_VERSION}): wiping ${keys.length} key(s)`);
+  await Promise.all(keys.map(k => context.globalState.update(k, undefined)));
+  await context.globalState.update(flagKey, true);
+}
+
 export function activate(context: vscode.ExtensionContext) {
   logger.log('Extension activating...');
+  migrateGlobalState(context); // fire-and-forget; runs before any task restore
 
   // Register terminal capture
   registerTerminalCapture(context);
@@ -122,14 +148,16 @@ async function completeRegisterPowerToys(
 
     // source.onEntitlementChange fires when Bob logs in and re-evaluates
     // entitlements. Use it (once) to retry the login-dependent setup.
+    // onEntitlementChange's addListener has a dead-code bug in the current Bob
+    // build — the dispose function is written after a return statement and is
+    // never actually returned. The callback receives no disposable, so we use
+    // the fired flag as the sole one-shot guard instead.
     let fired = false;
-    const disposable = source.onEntitlementChange(() => {
+    source.onEntitlementChange(() => {
       if (fired) { return; }
       fired = true;
-      disposable.dispose();
       completeRegisterPowerToys(context, bobExports, source);
     });
-    context.subscriptions.push(disposable);
     return;
   }
 
