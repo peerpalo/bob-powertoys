@@ -327,7 +327,7 @@ export function resolveOpenFilePath(
     if (stripped === prefix ||
         stripped.startsWith(prefix + '/') ||
         stripped.startsWith(prefix + '\\')) {
-      const rel = stripped.slice(prefix.length).replace(/^[/\\]/, '');
+      const rel = stripped.slice(prefix.length).replace(/^[/\\]/, '').replace(/\\/g, '/');
       return rel ? path.join(folder.uri.fsPath, rel) : folder.uri.fsPath;
     }
   }
