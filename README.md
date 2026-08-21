@@ -4,7 +4,7 @@ Enhanced development tools for [IBM Bob](https://bob.ibm.com/): debugging, termi
 
 ## What is PowerToys for Bob?
 
-PowerToys for Bob is an IBM Bob extension that **supercharges your development workflow**. It supports multi-root workspaces, letting Bob read, write, and search files across all your workspace folders seamlessly. It adds quality-of-life improvements like detaching the chat panel to a separate OS window and automatically restoring the last active task on reopen. It also gives Bob direct access to your debugging sessions so it can set breakpoints, inspect variables, control execution, and read terminal output: all without manual copy-pasting.
+PowerToys for Bob is an IBM Bob extension that **supercharges your development workflow**. It supports multi-root workspaces, letting Bob read, write, search files, and run commands across all your workspace folders seamlessly. It adds quality-of-life improvements like detaching the chat panel to a separate OS window and automatically restoring the last active task on reopen. It also gives Bob direct access to your debugging sessions so it can set breakpoints, inspect variables, control execution, and read terminal output: all without manual copy-pasting.
 
 > **Disclaimer:** PowerToys for Bob is a personal project. It is not affiliated with, endorsed by, or supported by IBM.
 
@@ -77,11 +77,11 @@ This works silently in the background: the save happens as you use Bob normally,
 
 When you open a Bob workspace with **multiple root folders at different paths on disk** (e.g. `...\src\frontend` and `...\src\backend` in the same `.code-workspace` file), Bob's built-in tools (`read_file`, `list_files`, `glob`, `grep`) are sandboxed to only the primary folder. Every file in a secondary folder triggers a "allow outside workspace?" confirmation prompt.
 
-PowerToys for Bob solves this by providing nine workspace-aware tools that use the VS Code filesystem API directly, with no sandbox restrictions. The tools are **automatically hidden** in single-root workspaces - they consume no tokens and cannot be called when there is only one folder.
+PowerToys for Bob solves this by providing ten workspace-aware tools that use the VS Code filesystem API directly, with no sandbox restrictions. The tools are **automatically hidden** in single-root workspaces - they consume no tokens and cannot be called when there is only one folder.
 
 ## Available Tools
 
-Bob has access to 32 tools organized in 6 categories:
+Bob has access to 33 tools organized in 6 categories:
 
 ### Breakpoint Management (3 tools)
 - `set_breakpoints` - Set multiple breakpoints with optional conditions
@@ -115,7 +115,7 @@ Bob has access to 32 tools organized in 6 categories:
 - `search_terminal_output` - Search terminal with regex
 - `focus_terminal` - Bring terminal into focus
 
-### Multi-Root Workspace (9 tools)
+### Multi-Root Workspace (10 tools)
 
 > These tools are **only active in multi-root workspaces** (2+ root folders). They are invisible to Bob in single-root workspaces.
 
@@ -128,6 +128,7 @@ Bob has access to 32 tools organized in 6 categories:
 - `insert_workspace_content` - Insert lines at a specific position in any file in any workspace folder
 - `search_and_replace_workspace` - Find-and-replace text (literal or regex) in any file in any workspace folder
 - `apply_diff_workspace` - Apply a SEARCH/REPLACE diff block to any file using Bob's fuzzy diff engine
+- `execute_workspace_command` - Execute a CLI command with its working directory set to a specific workspace folder
 
 For detailed tool documentation and parameters, see [DEVELOPMENT.md](DEVELOPMENT.md).
 
