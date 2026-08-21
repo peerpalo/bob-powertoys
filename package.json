@@ -2,7 +2,7 @@
   "name": "bob-powertoys",
   "displayName": "PowerToys for Bob",
   "description": "Enhanced development tools for IBM Bob: debugging, terminal access, multi-root workspace support, and quality-of-life improvements.",
-  "version": "0.7.1",
+  "version": "0.7.2",
   "icon": "assets/icon.png",
   "license": "MIT",
   "publisher": "peerpalo",
@@ -94,9 +94,10 @@
     }
   },
   "scripts": {
-    "vscode:prepublish": "npm run compile",
-    "compile": "tsc -p ./",
-    "watch": "tsc -watch -p ./",
+    "vscode:prepublish": "node esbuild.js --production",
+    "compile": "node esbuild.js",
+    "watch": "node esbuild.js --watch",
+    "typecheck": "tsc -p ./ --noEmit",
     "test": "vitest run",
     "test:watch": "vitest"
   },
@@ -106,11 +107,15 @@
     "@typescript-eslint/eslint-plugin": "^8.67.0",
     "@typescript-eslint/parser": "^8.67.0",
     "@vscode/vsce": "^3.9.2",
+    "esbuild": "^0.28.2",
     "eslint": "^10.8.1",
     "typescript": "^6.0.3",
     "vitest": "^4.1.11"
   },
   "dependencies": {
     "diff": "^9.0.0"
+  },
+  "allowScripts": {
+    "esbuild@0.28.2": true
   }
 }
