@@ -4,8 +4,15 @@
     {
       "type": "npm",
       "script": "watch",
-      "problemMatcher": "$tsc-watch",
       "isBackground": true,
+      "problemMatcher": {
+        "pattern": { "regexp": "^$" },
+        "background": {
+          "activeOnStart": true,
+          "beginsPattern": "^Starting compilation in watch mode",
+          "endsPattern": "^Found 0 errors\\. Watching for file changes"
+        }
+      },
       "presentation": {
         "reveal": "never"
       },
@@ -17,7 +24,7 @@
     {
       "type": "npm",
       "script": "compile",
-      "problemMatcher": "$tsc",
+      "problemMatcher": [],
       "presentation": {
         "reveal": "silent"
       },
