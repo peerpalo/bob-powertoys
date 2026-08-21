@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
+import { paramsToSchema } from '../utils.js';
 
 // ─── Bob-set Breakpoint Tracking ─────────────────────────────────────────────
 
@@ -50,7 +51,7 @@ export class SetBreakpointsTool {
   ];
 
   // Property - read by toolToOpenAi(e).parameters
-  parameters = SetBreakpointsTool.PARAMS;
+  parameters = paramsToSchema(SetBreakpointsTool.PARAMS);
 
   // Method - read by the newer getParameters(env) paths
   getParameters(_env?: any): any[] {
@@ -165,7 +166,7 @@ export class RemoveBreakpointsTool {
   ];
 
   // Property - read by toolToOpenAi(e).parameters
-  parameters = RemoveBreakpointsTool.PARAMS;
+  parameters = paramsToSchema(RemoveBreakpointsTool.PARAMS);
 
   // Method - read by the newer getParameters(env) paths
   getParameters(_env?: any): any[] {
@@ -246,7 +247,7 @@ export class ListBreakpointsTool {
   private static readonly PARAMS: any[] = [];
 
   // Property - read by toolToOpenAi(e).parameters
-  parameters = ListBreakpointsTool.PARAMS;
+  parameters = paramsToSchema(ListBreakpointsTool.PARAMS);
 
   // Method - read by the newer getParameters(env) paths
   getParameters(_env?: any): any[] {

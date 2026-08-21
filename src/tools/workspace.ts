@@ -11,10 +11,7 @@
  */
 
 import * as vscode from 'vscode';
-import * as path from 'path';
-import { getTaskManager, findTaskChatManager, resolveRipGrepBinary, spawnRipGrep, statMtimes, ripGrepFiles, buildIgnoreFileArgs, RG_FIELD_SEP, getApplyDiffTool, normaliseWorkspacePath } from '../utils.js';
-
-// ─── Helpers ─────────────────────────────────────────────────────────────────
+import { getTaskManager, findTaskChatManager, getBobTool, normaliseWorkspacePath, paramsToSchema, createPatch, absolutiseToolContent, resolveOpenFilePath } from '../utils.js';
 
 /** Return all workspace folder roots as { name, uri, fsPath, index } objects. */
 function getWorkspaceFolders() {
@@ -54,60 +51,11 @@ function resolveInFolder(
   return { uri };
 }
 
-/**
- * Recursively collect files/dirs up to `cap` entries.
- */
-async function readDirRecursive(
-  uri: vscode.Uri,
-  base: string,
-  results: Array<{ path: string; type: string }>,
-  cap: number
-): Promise<void> {
-  if (results.length >= cap) { return; }
-  let entries: [string, vscode.FileType][];
-  try {
-    entries = await vscode.workspace.fs.readDirectory(uri);
-  } catch {
-    return;
-  }
-  for (const [name, type] of entries) {
-    if (results.length >= cap) { break; }
-    const rel = base ? `${base}/${name}` : name;
-    const entryType = type === vscode.FileType.Directory ? 'directory' : 'file';
-    results.push({ path: rel, type: entryType });
-    if (type === vscode.FileType.Directory) {
-      await readDirRecursive(vscode.Uri.joinPath(uri, name), rel, results, cap);
-    }
-  }
-}
-
 // ─── Shared helpers ───────────────────────────────────────────────────────────
 
 /** True when the workspace has more than one root folder. */
 function isMultiRoot(): boolean {
   return (vscode.workspace.workspaceFolders?.length ?? 0) > 1;
-}
-
-/**
- * Notify Bob that a file was changed so it can show the "N files changed /
- * Undo all / Show all" UI.  Called BEFORE pushResult so the edit is registered
- * before the tool is considered done.
- *
- * Errors are swallowed on purpose: the file has already been written to disk,
- * so a failure here must never surface as a tool error.
- */
-function notifyChange(
-  trackChange: ((uri: string, edit: { before: string; after: string }) => void) | undefined,
-  uri: vscode.Uri,
-  before: string,
-  after: string
-): void {
-  if (!trackChange) { return; }
-  try {
-    trackChange(uri.toString(), { before, after });
-  } catch {
-    // intentionally silent — the write already succeeded
-  }
 }
 
 // ─── Tool classes ─────────────────────────────────────────────────────────────
@@ -133,9 +81,7 @@ export class ListWorkspaceFoldersTool {
       'Bob\'s built-in tools (read_file, list_files, glob, grep) only work for the ' +
       'PRIMARY folder shown in environment_info - they will be blocked for all others. ' +
       'ALWAYS call this first on any task that might touch more than one project. ' +
-      'Then pass the folder\'s "name" as the "workspace" parameter to ' +
-      'read_workspace_file / write_workspace_file / list_workspace_files / ' +
-      'glob_workspace / grep_workspace.'
+      'Then pass the folder\'s "name" as the "workspace" parameter to any workspace-scoped tool.'
     );
   }
 
@@ -144,7 +90,11 @@ export class ListWorkspaceFoldersTool {
   }
 
   private static readonly PARAMS: any[] = [];
-  parameters = ListWorkspaceFoldersTool.PARAMS;
+
+  // Property - read by toolToOpenAi(e).parameters
+  parameters = paramsToSchema(ListWorkspaceFoldersTool.PARAMS);
+
+  // Method - read by the newer getParameters(env) paths
   getParameters(_env?: any): any[] { return ListWorkspaceFoldersTool.PARAMS; }
 
   getLabels(_args: Record<string, any>) {
@@ -174,7 +124,7 @@ export class ListWorkspaceFoldersTool {
 
     context.pushResult(JSON.stringify({
       totalFolders: folders.length,
-      note: 'Pass the folder "name" as the "workspace" parameter to read_workspace_file / write_workspace_file / list_workspace_files / glob_workspace / grep_workspace.',
+      note: 'Pass the folder "name" as the "workspace" parameter to any workspace-scoped tool.',
       folders,
     }, null, 2));
   }
@@ -234,7 +184,10 @@ export class ReadWorkspaceFileTool {
     },
   ];
 
-  parameters = ReadWorkspaceFileTool.PARAMS;
+  // Property - read by toolToOpenAi(e).parameters
+  parameters = paramsToSchema(ReadWorkspaceFileTool.PARAMS);
+
+  // Method - read by the newer getParameters(env) paths
   getParameters(_env?: any): any[] { return ReadWorkspaceFileTool.PARAMS; }
 
   getLabels(args: Record<string, any>) {
@@ -253,69 +206,42 @@ export class ReadWorkspaceFileTool {
     parameters: { workspace: string; path: string; range?: string };
     pushResult: (text: string) => void;
     pushError: (text: string) => void;
+    [key: string]: any;
   }): Promise<void> {
     const { workspace, path: filePath, range } = context.parameters;
 
-    const resolved = resolveInFolder(workspace, filePath);
+    const resolved = resolveInFolder(workspace, '');
     if ('error' in resolved) {
-      context.pushError(JSON.stringify({ error: resolved.error }));
-      return;
-    }
-    const { uri } = resolved;
-
-    let bytes: Uint8Array;
-    try {
-      bytes = await vscode.workspace.fs.readFile(uri);
-    } catch (err) {
-      context.pushError(JSON.stringify({
-        error: `Cannot read file: ${filePath}`,
-        resolvedPath: uri.fsPath,
-        message: err instanceof Error ? err.message : String(err),
-      }, null, 2));
+      context.pushError(resolved.error);
       return;
     }
 
-    const fullText = Buffer.from(bytes).toString('utf8');
-    const allLines = fullText.split('\n');
-
-    let startLine = 1;
-    let endLine = allLines.length;
-
-    if (range) {
-      // Same split logic as Bob's built-in read_file: split on either '-' or ','
-      const parts = range.split(/[-,]/).map(s => s.trim());
-      if (parts.length !== 2 || parts.some(p => p === '')) {
-        context.pushError(JSON.stringify({ error: `Invalid range format: "${range}". Use format "start-end" or "start,end" (e.g., "1-50")` }));
-        return;
-      }
-      const [s, e] = parts.map(Number);
-      if (isNaN(s) || isNaN(e)) {
-        context.pushError(JSON.stringify({ error: 'Invalid range: both start and end must be numbers' }));
-        return;
-      }
-      if (s < 1) {
-        context.pushError(JSON.stringify({ error: 'Invalid range: start line must be >= 1' }));
-        return;
-      }
-      if (e < s) {
-        context.pushError(JSON.stringify({ error: `Invalid range: end line (${e}) must be >= start line (${s})` }));
-        return;
-      }
-      startLine = s;
-      endLine = Math.min(allLines.length, e);
+    const readFileTool = getBobTool('read_file');
+    if (!readFileTool) {
+      context.pushError(
+        'read_workspace_file: read_file tool not found in current task.'
+      );
+      return;
     }
 
-    // Build numbered output (same style as Bob's built-in read_file)
-    const slice = allLines.slice(startLine - 1, endLine);
-    const numbered = slice.map((line, i) => `${startLine + i} | ${line}`).join('\n');
-
-    context.pushResult(JSON.stringify({
-      path: filePath,
-      resolvedPath: uri.fsPath,
-      totalLines: allLines.length,
-      returnedLines: { start: startLine, end: endLine },
-      content: numbered,
-    }, null, 2));
+    await readFileTool.call({
+      ...context,
+      env: {
+        ...context.env,
+        workspace: resolved.uri.fsPath,
+      },
+      parameters: {
+        path: filePath,
+        ...(range !== undefined && { range }),
+      },
+      // Bob's read_file calls p.trackFileRead(uri, mtime) without optional chaining.
+      // We can't receive it from the task runner (it's a closure over K), but we can
+      // replicate the effect: setMetadata merges into the same K object, so writing
+      // into fileMtimes via setMetadata is functionally identical to trackFileRead.
+      trackFileRead: (uri: string, mtime: number) => {
+        context.setMetadata?.({ fileMtimes: { [uri]: mtime } });
+      },
+    });
   }
 }
 
@@ -339,7 +265,7 @@ export class ListWorkspaceFilesTool {
       'secondary workspace folders OUTSIDE the primary workspace root. ' +
       'MUST be used instead of list_files for any directory not under the primary folder. ' +
       'Call list_workspace_folders first to get the folder name, then pass it as "workspace". ' +
-      'Use recursive:true to walk the full subtree (capped at 500 entries).'
+      'Use recursive:true to walk the full subtree (capped at 200 entries).'
     );
   }
 
@@ -367,14 +293,17 @@ export class ListWorkspaceFilesTool {
     {
       name: 'recursive',
       type: 'boolean',
-      description: 'If true, list files recursively. Defaults to false (top-level only). Recursive listings are capped at 500 entries.',
+      description: 'If true, list files recursively. Defaults to false (top-level only). Recursive listings are capped at 200 entries.',
       detail: 'List recursively (default: false)',
       required: false,
       usage: 'false',
     },
   ];
 
-  parameters = ListWorkspaceFilesTool.PARAMS;
+  // Property - read by toolToOpenAi(e).parameters
+  parameters = paramsToSchema(ListWorkspaceFilesTool.PARAMS);
+
+  // Method - read by the newer getParameters(env) paths
   getParameters(_env?: any): any[] { return ListWorkspaceFilesTool.PARAMS; }
 
   getLabels(args: Record<string, any>) {
@@ -396,54 +325,30 @@ export class ListWorkspaceFilesTool {
     pushResult: (text: string) => void;
     pushError: (text: string) => void;
   }): Promise<void> {
-    const { workspace, path: dirPath = '', recursive = false } = context.parameters;
-    const RECURSIVE_CAP = 500;
+    const { workspace, path: dirPath = '.', recursive = false } = context.parameters;
 
-    const resolved = resolveInFolder(workspace, dirPath);
+    const resolved = resolveInFolder(workspace, '');
     if ('error' in resolved) {
       context.pushError(JSON.stringify({ error: resolved.error }));
       return;
     }
-    const { uri } = resolved;
 
-    if (!recursive) {
-      let entries: [string, vscode.FileType][];
-      try {
-        entries = await vscode.workspace.fs.readDirectory(uri);
-      } catch (err) {
-        context.pushError(JSON.stringify({
-          error: `Cannot list directory: ${dirPath}`,
-          resolvedPath: uri.fsPath,
-          message: err instanceof Error ? err.message : String(err),
-        }, null, 2));
-        return;
-      }
-
-      const items = entries.map(([name, type]) => ({
-        name,
-        type: type === vscode.FileType.Directory ? 'directory' : 'file',
-      }));
-
-      context.pushResult(JSON.stringify({
-        workspace,
-        path: dirPath || '.',
-        resolvedPath: uri.fsPath,
-        totalEntries: items.length,
-        entries: items,
-      }, null, 2));
-    } else {
-      const results: Array<{ path: string; type: string }> = [];
-      await readDirRecursive(uri, '', results, RECURSIVE_CAP);
-
-      context.pushResult(JSON.stringify({
-        workspace,
-        path: dirPath || '.',
-        resolvedPath: uri.fsPath,
-        totalEntries: results.length,
-        capped: results.length >= RECURSIVE_CAP,
-        entries: results,
-      }, null, 2));
+    const listFilesTool = getBobTool('list_files');
+    if (!listFilesTool) {
+      context.pushError(
+        'list_workspace_files: list_files tool not found in current task.'
+      );
+      return;
     }
+
+    const wsRoot = resolved.uri.fsPath;
+    await listFilesTool.call({
+      ...context,
+      env: { ...context.env, workspace: wsRoot },
+      parameters: { path: dirPath, recursive },
+      pushResult: (text: string) =>
+        context.pushResult(absolutiseToolContent(text, 'glob', wsRoot)),
+    });
   }
 }
 
@@ -501,7 +406,10 @@ export class GlobWorkspaceTool {
     },
   ];
 
-  parameters = GlobWorkspaceTool.PARAMS;
+  // Property - read by toolToOpenAi(e).parameters
+  parameters = paramsToSchema(GlobWorkspaceTool.PARAMS);
+
+  // Method - read by the newer getParameters(env) paths
   getParameters(_env?: any): any[] { return GlobWorkspaceTool.PARAMS; }
 
   getLabels(args: Record<string, any>) {
@@ -524,77 +432,70 @@ export class GlobWorkspaceTool {
     pushError: (text: string) => void;
   }): Promise<void> {
     const { pattern, workspace, path: subPath } = context.parameters;
-    const MAX_RESULTS = 100;
 
     if (!pattern?.trim()) {
       context.pushError('pattern is required');
       return;
     }
 
+    const globTool = getBobTool('glob');
+    if (!globTool) {
+      context.pushError('glob_workspace: glob tool not found in current task.');
+      return;
+    }
+
+    // Determine which workspace roots to search
     const folders = vscode.workspace.workspaceFolders ?? [];
     if (folders.length === 0) {
       context.pushError(JSON.stringify({ error: 'No workspace folders are open.' }));
       return;
     }
 
-    let roots: Array<{ fsPath: string; label: string }>;
+    let roots: Array<vscode.WorkspaceFolder>;
     if (workspace) {
-      const resolved = resolveInFolder(workspace, subPath ?? '');
+      const resolved = resolveInFolder(workspace, '');
       if ('error' in resolved) {
         context.pushError(JSON.stringify({ error: resolved.error }));
         return;
       }
-      roots = [{ fsPath: resolved.uri.fsPath, label: subPath ? `${workspace}/${subPath}` : workspace }];
-    } else {
-      roots = folders.map(f => ({ fsPath: f.uri.fsPath, label: f.name }));
-    }
-
-    const rgBinary = await resolveRipGrepBinary();
-    if (!rgBinary) {
-      context.pushError(JSON.stringify({ error: 'ripgrep binary not found under VS Code appRoot. Cannot search.' }));
-      return;
-    }
-
-    const allPaths: string[] = [];
-    for (const root of roots) {
-      if (allPaths.length >= MAX_RESULTS) { break; }
-      // Mirror Bob's GlobTool.call(): pass buildIgnoreFileArgs so .gitignore/.bobignore are respected
-      const ignoreArgs = await buildIgnoreFileArgs(root.fsPath);
-      const args = [
-        '--files',
-        '--hidden',
-        '--glob=!.git/',
-        '--no-messages',
-        ...ignoreArgs,
-        '--glob', pattern.replace(/\\/g, '/'),
-        root.fsPath,
-      ];
-      try {
-        const found = await ripGrepFiles(rgBinary, args, MAX_RESULTS - allPaths.length);
-        allPaths.push(...found);
-      } catch {
-        // no matches in this root
+      // Find the matching folder object so we can use its fsPath as workspace root
+      const folder = folders.find(f => f.name === workspace);
+      if (!folder) {
+        context.pushError(JSON.stringify({ error: `Workspace folder "${workspace}" not found.` }));
+        return;
       }
+      roots = [folder];
+    } else {
+      roots = [...folders];
     }
 
-    if (allPaths.length === 0) {
+    // Call glob once per root, collecting all output chunks
+    const chunks: string[] = [];
+    for (const folder of roots) {
+      const collected: string[] = [];
+      await globTool.call({
+        ...context,
+        env: {
+          ...context.env,
+          workspace: folder.uri.fsPath,
+        },
+        parameters: {
+          pattern,
+          // When a sub-path is given, pass it so Bob scopes the search to that directory
+          ...(subPath ? { path: subPath } : {}),
+        },
+        pushResult: (text: string) =>
+          collected.push(absolutiseToolContent(text, 'glob', folder.uri.fsPath)),
+        pushError:  (text: string) => context.pushError(text),
+      });
+      chunks.push(...collected);
+    }
+
+    if (chunks.length === 0) {
       context.pushResult('No files found');
       return;
     }
-
-    const total = allPaths.length;
-    const capped = total > MAX_RESULTS;
-    const shown = capped ? allPaths.slice(0, MAX_RESULTS) : allPaths;
-    // Paths are already relative to root; make them relative to the workspace root for display
-    const lines: string[] = shown.map(p => {
-      // Try to make relative to a workspace root for a clean display
-      const folder = (vscode.workspace.workspaceFolders ?? []).find(f => p.startsWith(f.uri.fsPath));
-      return folder ? path.relative(folder.uri.fsPath, p) : p;
-    });
-    if (capped) {
-      lines.push('', `(Results truncated: showing ${MAX_RESULTS} of ${total} entries. Use a more specific path or pattern.)`);
-    }
-    context.pushResult(lines.join('\n'));
+    context.pushResult(chunks.join('\n'));
   }
 }
 
@@ -686,7 +587,10 @@ export class GrepWorkspaceTool {
     },
   ];
 
-  parameters = GrepWorkspaceTool.PARAMS;
+  // Property - read by toolToOpenAi(e).parameters
+  parameters = paramsToSchema(GrepWorkspaceTool.PARAMS);
+
+  // Method - read by the newer getParameters(env) paths
   getParameters(_env?: any): any[] { return GrepWorkspaceTool.PARAMS; }
 
   getLabels(args: Record<string, any>) {
@@ -717,146 +621,70 @@ export class GrepWorkspaceTool {
     pushResult: (text: string) => void;
     pushError: (text: string) => void;
   }): Promise<void> {
-    const { pattern, workspace, path: subPath, include: includeGlob,
-            ignore_case = false, invert_match = false, word_regexp = false,
-            files_with_matches = false } = context.parameters;
-    const MAX_MATCHES = 100;
+    const { pattern, workspace, path: subPath, include,
+            ignore_case, invert_match, word_regexp, files_with_matches } = context.parameters;
 
+    const grepTool = getBobTool('grep');
+    if (!grepTool) {
+      context.pushError('grep_workspace: grep tool not found in current task.');
+      return;
+    }
+
+    // Determine which workspace roots to search
     const folders = vscode.workspace.workspaceFolders ?? [];
     if (folders.length === 0) {
       context.pushError(JSON.stringify({ error: 'No workspace folders are open.' }));
       return;
     }
 
-    // Determine search roots (fsPath strings)
-    let roots: Array<{ fsPath: string; label: string }>;
+    let roots: Array<vscode.WorkspaceFolder>;
     if (workspace) {
-      const resolved = resolveInFolder(workspace, subPath ?? '');
+      const resolved = resolveInFolder(workspace, '');
       if ('error' in resolved) {
         context.pushError(JSON.stringify({ error: resolved.error }));
         return;
       }
-      roots = [{ fsPath: resolved.uri.fsPath, label: subPath ? `${workspace}/${subPath}` : workspace }];
+      const folder = folders.find(f => f.name === workspace);
+      if (!folder) {
+        context.pushError(JSON.stringify({ error: `Workspace folder "${workspace}" not found.` }));
+        return;
+      }
+      roots = [folder];
     } else {
-      roots = folders.map(f => ({ fsPath: f.uri.fsPath, label: f.name }));
+      roots = [...folders];
     }
 
-    // Resolve ripgrep - fall back to pure-JS implementation if not found
-    const rgBinary = await resolveRipGrepBinary();
-    if (!rgBinary) {
-      context.pushError(JSON.stringify({ error: 'ripgrep binary not found under VS Code appRoot. Cannot search.' }));
+    // Call grep once per root, collecting all output chunks
+    const chunks: string[] = [];
+    for (const folder of roots) {
+      const collected: string[] = [];
+      await grepTool.call({
+        ...context,
+        env: {
+          ...context.env,
+          workspace: folder.uri.fsPath,
+        },
+        parameters: {
+          pattern,
+          ...(subPath       !== undefined && { path:               subPath }),
+          ...(include       !== undefined && { include }),
+          ...(ignore_case   !== undefined && { ignore_case }),
+          ...(invert_match  !== undefined && { invert_match }),
+          ...(word_regexp   !== undefined && { word_regexp }),
+          ...(files_with_matches !== undefined && { files_with_matches }),
+        },
+        pushResult: (text: string) =>
+          collected.push(absolutiseToolContent(text, 'grep', folder.uri.fsPath)),
+        pushError:  (text: string) => context.pushError(text),
+      });
+      chunks.push(...collected);
+    }
+
+    if (chunks.length === 0) {
+      context.pushResult('No files found');
       return;
     }
-
-    // Args that go before the per-root ignore files (same flags as Bob's GrepTool)
-    const preArgs: string[] = ['--hidden', '--glob=!.git/', '--no-messages'];
-    if (files_with_matches) {
-      preArgs.unshift('-l');
-    } else {
-      preArgs.unshift('-nH', `--field-match-separator=${RG_FIELD_SEP}`);
-    }
-
-    // Args that go after the ignore files
-    const postArgs: string[] = ['-e', pattern];
-    if (ignore_case)   { postArgs.push('-i'); }
-    if (invert_match)  { postArgs.push('-v'); }
-    if (word_regexp)   { postArgs.push('-w'); }
-    if (includeGlob)   { postArgs.push('--glob', includeGlob.replace(/\\/g, '/')); }
-
-    // Run once per root and collect results
-    interface LineMatch { line: number; text: string; }
-    interface FileResult { folder: string; path: string; fullPath: string; matches: LineMatch[]; }
-    const allResults: FileResult[] = [];
-    let totalLines = 0;
-    let capped = false;
-
-    for (const root of roots) {
-      // Build per-root ignore args so each workspace's .gitignore/.bobignore is respected
-      const ignoreArgs = await buildIgnoreFileArgs(root.fsPath);
-      const args = [...preArgs, ...ignoreArgs, ...postArgs, root.fsPath];
-      let raw: string;
-      try {
-        raw = await spawnRipGrep(rgBinary, args);
-      } catch (err) {
-        // No matches in this root - mirror Bob: don't push error, just skip
-        continue;
-      }
-
-      if (files_with_matches) {
-        // Each line is a file path
-        for (const line of raw.trim().split(/\r?\n/).filter(Boolean)) {
-          allResults.push({
-            folder: root.label,
-            path: path.relative(root.fsPath, line),
-            fullPath: line,
-            matches: [],
-          });
-        }
-        continue;
-      }
-
-      // Parse -nH --field-match-separator output: filePath<SEP>lineNum<SEP>text
-      const fileMap = new Map<string, FileResult>();
-      for (const line of raw.trim().split(/\r?\n/).filter(Boolean)) {
-        const [filePath, lineNumStr, ...rest] = line.split(RG_FIELD_SEP);
-        if (!filePath || !lineNumStr) { continue; }
-        const lineNum = parseInt(lineNumStr, 10);
-        if (isNaN(lineNum)) { continue; }
-        const text = rest.join(RG_FIELD_SEP);
-
-        if (!fileMap.has(filePath)) {
-          fileMap.set(filePath, {
-            folder: root.label,
-            path: path.relative(root.fsPath, filePath),
-            fullPath: filePath,
-            matches: [],
-          });
-        }
-        fileMap.get(filePath)!.matches.push({ line: lineNum, text });
-        totalLines++;
-        if (totalLines >= MAX_MATCHES) { capped = true; }
-        if (capped) { break; }
-      }
-      allResults.push(...fileMap.values()); // always push, even if capped mid-file
-      if (capped) { break; }
-    }
-
-    if (files_with_matches) {
-      // Mirror Bob's formatFilesOutput: use relative paths, cap at MAX_MATCHES
-      const relPaths = allResults.map(r => r.path);
-      if (relPaths.length === 0) {
-        context.pushResult('No files found');
-        return;
-      }
-      const fileCapped = relPaths.length > MAX_MATCHES;
-      const shownPaths = fileCapped ? relPaths.slice(0, MAX_MATCHES) : relPaths;
-      const lines: string[] = [
-        `Found ${relPaths.length} file${relPaths.length === 1 ? '' : 's'} with matches`,
-        ...shownPaths,
-      ];
-      if (fileCapped) { lines.push('', '(Results truncated. Use a more specific path or pattern.)'); }
-      context.pushResult(lines.join('\n'));
-    } else {
-      if (allResults.length === 0) {
-        context.pushResult('No files found');
-        return;
-      }
-      // Sort by mtime descending (newest first) - same as Bob's formatOutput
-      const uniquePaths = [...new Set(allResults.map(r => r.fullPath))];
-      const mtimes = await statMtimes(uniquePaths);
-      allResults.sort((a, b) => (mtimes.get(b.fullPath) ?? 0) - (mtimes.get(a.fullPath) ?? 0));
-
-      const lines: string[] = [`Found ${totalLines} match${totalLines === 1 ? '' : 'es'}${capped ? ` (showing first ${MAX_MATCHES})` : ''}`];
-      for (const file of allResults) {
-        lines.push('');
-        lines.push(`${file.path}:`);
-        for (const m of file.matches) {
-          lines.push(`  Line ${m.line}: ${m.text.length > 2000 ? m.text.substring(0, 2000) + '...' : m.text}`);
-        }
-      }
-      if (capped) { lines.push(''); lines.push('(Results truncated. Use a more specific path or pattern.)'); }
-      context.pushResult(lines.join('\n'));
-    }
+    context.pushResult(chunks.join('\n'));
   }
 }
 
@@ -930,7 +758,10 @@ export class WriteWorkspaceFileTool {
     },
   ];
 
-  parameters = WriteWorkspaceFileTool.PARAMS;
+  // Property - read by toolToOpenAi(e).parameters
+  parameters = paramsToSchema(WriteWorkspaceFileTool.PARAMS);
+
+  // Method - read by the newer getParameters(env) paths
   getParameters(_env?: any): any[] { return WriteWorkspaceFileTool.PARAMS; }
 
   getLabels(args: Record<string, any>) {
@@ -948,67 +779,44 @@ export class WriteWorkspaceFileTool {
     parameters: { workspace: string; path: string; content: string; line_count?: number };
     pushResult: (text: string) => void;
     pushError: (text: string) => void;
-    trackChange?: (uri: string, edit: { before: string; after: string }) => void;
+    setMetadata?: (meta: Record<string, any>) => void;
+    [key: string]: any;
   }): Promise<void> {
     const { workspace, path: filePath, content, line_count } = context.parameters;
 
-    const resolved = resolveInFolder(workspace, filePath);
+    const resolved = resolveInFolder(workspace, '');
     if ('error' in resolved) {
       context.pushError(JSON.stringify({ error: resolved.error }));
       return;
     }
-    const { uri } = resolved;
 
-    // Optional truncation check
-    if (line_count !== undefined) {
-      const actualLines = content.split('\n').length;
-      if (actualLines < line_count * 0.8) {
-        context.pushError(JSON.stringify({
-          error: `Content truncation detected: expected ~${line_count} lines but got ${actualLines}. Provide the complete file content.`,
-          expectedLines: line_count,
-          actualLines,
-        }));
-        return;
-      }
-    }
-
-    // Read previous content for change tracking (best-effort; empty string for new files)
-    let before = '';
-    try {
-      const prevBytes = await vscode.workspace.fs.readFile(uri);
-      before = Buffer.from(prevBytes).toString('utf8');
-    } catch {
-      // New file - before stays ''
-    }
-
-    // Ensure parent directory exists
-    const parentUri = vscode.Uri.joinPath(uri, '..');
-    try {
-      await vscode.workspace.fs.createDirectory(parentUri);
-    } catch {
-      // Directory may already exist - ignore
-    }
-
-    try {
-      await vscode.workspace.fs.writeFile(uri, Buffer.from(content, 'utf8'));
-    } catch (err) {
-      context.pushError(JSON.stringify({
-        error: `Cannot write file: ${filePath}`,
-        resolvedPath: uri.fsPath,
-        message: err instanceof Error ? err.message : String(err),
-      }, null, 2));
+    const writeFileTool = getBobTool('write_file');
+    if (!writeFileTool) {
+      context.pushError('write_workspace_file: write_file tool not found in current task.');
       return;
     }
 
-    notifyChange(context.trackChange, uri, before, content);
-
-    const lineCount = content.split('\n').length;
-    context.pushResult(JSON.stringify({
-      path: filePath,
-      resolvedPath: uri.fsPath,
-      linesWritten: lineCount,
-      bytesWritten: Buffer.byteLength(content, 'utf8'),
-    }, null, 2));
+    await writeFileTool.call({
+      ...context,
+      env: {
+        ...context.env,
+        workspace: resolved.uri.fsPath,
+      },
+      parameters: {
+        path: filePath,
+        content,
+        ...(line_count !== undefined && { line_count }),
+      },
+      // Bob's write_file calls f.pushEdit(uri, { before, after, mtime }) unconditionally.
+      // Bridge it to setMetadata so the undo entry (K.changes) and mtime (K.fileMtimes)
+      // are recorded in Bob's task metadata — identical to what Bob's own task runner does.
+      pushEdit: (uri: string, edit: { before: string; after: string; mtime?: number }) => {
+        context.setMetadata?.({
+          changes: { [uri]: { before: edit.before, after: edit.after, patch: createPatch(uri, edit.before, edit.after) } },
+          ...(edit.mtime !== undefined && { fileMtimes: { [uri]: edit.mtime } }),
+        });
+      },
+    });
   }
 }
 
@@ -1069,7 +877,10 @@ export class InsertWorkspaceContentTool {
     },
   ];
 
-  parameters = InsertWorkspaceContentTool.PARAMS;
+  // Property - read by toolToOpenAi(e).parameters
+  parameters = paramsToSchema(InsertWorkspaceContentTool.PARAMS);
+
+  // Method - read by the newer getParameters(env) paths
   getParameters(_env?: any): any[] { return InsertWorkspaceContentTool.PARAMS; }
 
   getLabels(args: Record<string, any>) {
@@ -1087,67 +898,37 @@ export class InsertWorkspaceContentTool {
     parameters: { workspace: string; path: string; line: number; content: string };
     pushResult: (text: string) => void;
     pushError: (text: string) => void;
-    trackChange?: (uri: string, edit: { before: string; after: string }) => void;
+    setMetadata?: (meta: Record<string, any>) => void;
+    [key: string]: any;
   }): Promise<void> {
     const { workspace, path: filePath, line, content } = context.parameters;
 
-    const resolved = resolveInFolder(workspace, filePath);
+    const resolved = resolveInFolder(workspace, '');
     if ('error' in resolved) {
       context.pushError(JSON.stringify({ error: resolved.error }));
       return;
     }
-    const { uri } = resolved;
 
-    let existing: string;
-    try {
-      const bytes = await vscode.workspace.fs.readFile(uri);
-      existing = Buffer.from(bytes).toString('utf8');
-    } catch (err) {
-      context.pushError(`Error reading file ${filePath}: ${err instanceof Error ? err.message : String(err)}`);
+    const insertContentTool = getBobTool('insert_content');
+    if (!insertContentTool) {
+      context.pushError('insert_workspace_content: insert_content tool not found in current task.');
       return;
     }
 
-    const lineNum = Number(line);
-    if (isNaN(lineNum) || lineNum < 0) {
-      context.pushError(`Invalid line number ${line}. Must be 0 or greater.`);
-      return;
-    }
-
-    // Detect line ending
-    const eol = existing.includes('\r\n') ? '\r\n' : '\n';
-    const rows = existing.split(/\r?\n/);
-
-    if (lineNum > rows.length) {
-      context.pushError(`Invalid line number ${lineNum}. File only has ${rows.length} lines.`);
-      return;
-    }
-
-    // Normalise inserted content to match file's line ending
-    const normalised = content.replace(/\r?\n/g, eol);
-
-    let after: string;
-    if (lineNum === 0) {
-      // Append: ensure file ends with a newline before appending
-      after = existing + (existing.endsWith('\n') ? '' : eol) + normalised;
-    } else {
-      // Insert before the given line (1-based → 0-based index)
-      rows.splice(lineNum - 1, 0, normalised);
-      after = rows.join(eol);
-    }
-
-    try {
-      await vscode.workspace.fs.writeFile(uri, Buffer.from(after, 'utf8'));
-    } catch (err) {
-      context.pushError(`Error inserting content into file ${filePath}: ${err instanceof Error ? err.message : String(err)}`);
-      return;
-    }
-
-    notifyChange(context.trackChange, uri, existing, after);
-
-    context.pushResult(
-      `Inserted content ${lineNum === 0 ? 'at end of' : `before line ${lineNum} of`} ` +
-      `${workspace}/${filePath} (file now has ${after.split(/\r?\n/).length} lines)`
-    );
+    await insertContentTool.call({
+      ...context,
+      env: {
+        ...context.env,
+        workspace: resolved.uri.fsPath,
+      },
+      parameters: { path: filePath, line, content },
+      pushEdit: (uri: string, edit: { before: string; after: string; mtime?: number }) => {
+        context.setMetadata?.({
+          changes: { [uri]: { before: edit.before, after: edit.after, patch: createPatch(uri, edit.before, edit.after) } },
+          ...(edit.mtime !== undefined && { fileMtimes: { [uri]: edit.mtime } }),
+        });
+      },
+    });
   }
 }
 
@@ -1233,7 +1014,10 @@ export class SearchAndReplaceWorkspaceTool {
     },
   ];
 
-  parameters = SearchAndReplaceWorkspaceTool.PARAMS;
+  // Property - read by toolToOpenAi(e).parameters
+  parameters = paramsToSchema(SearchAndReplaceWorkspaceTool.PARAMS);
+
+  // Method - read by the newer getParameters(env) paths
   getParameters(_env?: any): any[] { return SearchAndReplaceWorkspaceTool.PARAMS; }
 
   getLabels(args: Record<string, any>) {
@@ -1260,114 +1044,46 @@ export class SearchAndReplaceWorkspaceTool {
     };
     pushResult: (text: string) => void;
     pushError: (text: string) => void;
-    trackChange?: (uri: string, edit: { before: string; after: string }) => void;
+    setMetadata?: (meta: Record<string, any>) => void;
+    [key: string]: any;
   }): Promise<void> {
     const { workspace, path: filePath, search, replace,
             start_line, end_line, use_regex, ignore_case } = context.parameters;
 
-    const toBool = (v: string | boolean | undefined): boolean =>
-      typeof v === 'boolean' ? v :
-      v === '1' || String(v ?? '').toLowerCase() === 'true' || String(v ?? '').toLowerCase() === 'yes';
-
-    const useRegex  = toBool(use_regex);
-    const ignoreCase = toBool(ignore_case);
-
-    const resolved = resolveInFolder(workspace, filePath);
+    const resolved = resolveInFolder(workspace, '');
     if ('error' in resolved) {
       context.pushError(JSON.stringify({ error: resolved.error }));
       return;
     }
-    const { uri } = resolved;
 
-    let existing: string;
-    try {
-      const bytes = await vscode.workspace.fs.readFile(uri);
-      existing = Buffer.from(bytes).toString('utf8');
-    } catch (err) {
-      context.pushError(`Error reading file ${filePath}: ${err instanceof Error ? err.message : String(err)}`);
+    const searchAndReplaceTool = getBobTool('search_and_replace');
+    if (!searchAndReplaceTool) {
+      context.pushError('search_and_replace_workspace: search_and_replace tool not found in current task.');
       return;
     }
 
-    const eol = existing.includes('\r\n') ? '\r\n' : '\n';
-    const rows = existing.split(eol);
-    const lineCount = rows.length;
-
-    // Validate line range
-    if (start_line !== undefined && (start_line < 1 || start_line > lineCount)) {
-      context.pushError(`Invalid start_line: ${start_line}. Must be between 1 and ${lineCount}.`);
-      return;
-    }
-    if (end_line !== undefined && (end_line < 1 || end_line > lineCount)) {
-      context.pushError(`Invalid end_line: ${end_line}. Must be between 1 and ${lineCount}.`);
-      return;
-    }
-    if (start_line !== undefined && end_line !== undefined && start_line > end_line) {
-      context.pushError(`Invalid line range: start_line (${start_line}) must be less than or equal to end_line (${end_line})`);
-      return;
-    }
-
-    // Build regex - use 's' (dotAll) flag so '.' spans newlines, enabling multi-line search
-    let pattern: RegExp;
-    try {
-      if (useRegex) {
-        pattern = new RegExp(search, ignoreCase ? 'gis' : 'gs');
-      } else {
-        const escaped = search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        pattern = new RegExp(escaped, ignoreCase ? 'gis' : 'gs');
-      }
-    } catch (err) {
-      context.pushError(`Invalid regex pattern: ${err instanceof Error ? err.message : String(err)}`);
-      return;
-    }
-
-    let after: string;
-    let replacementCount = 0;
-
-    const hasLineRange = start_line !== undefined || end_line !== undefined;
-
-    if (!hasLineRange) {
-      // No line range: operate on the full file string so multi-line search/replace works correctly
-      const matches = existing.match(pattern);
-      if (!matches) {
-        context.pushError(`No matches found for search pattern`);
-        return;
-      }
-      replacementCount = matches.length;
-      after = existing.replace(pattern, replace);
-    } else {
-      // Line range: operate row-by-row on the restricted slice, same as Bob's computeEdit
-      const startIdx = start_line !== undefined ? start_line - 1 : 0;
-      const endIdx   = end_line   !== undefined ? end_line       : lineCount;
-      const newRows: string[] = rows.map((row, i) => {
-        if (i >= startIdx && i < endIdx) {
-          const m = row.match(pattern);
-          if (m) {
-            replacementCount += m.length;
-            return row.replace(pattern, replace);
-          }
-        }
-        return row;
-      });
-      if (replacementCount === 0) {
-        const rangeNote = ` in lines ${start_line || 1}-${end_line || lineCount}`;
-        context.pushError(`No matches found for search pattern${rangeNote}`);
-        return;
-      }
-      after = newRows.join(eol);
-    }
-
-    try {
-      await vscode.workspace.fs.writeFile(uri, Buffer.from(after, 'utf8'));
-    } catch (err) {
-      context.pushError(`Error writing file ${filePath}: ${err instanceof Error ? err.message : String(err)}`);
-      return;
-    }
-
-    notifyChange(context.trackChange, uri, existing, after);
-
-    const rangeNote = hasLineRange
-      ? ` in lines ${start_line || 1}-${end_line || lineCount}` : '';
-    context.pushResult(`Successfully replaced ${replacementCount} occurrence(s)${rangeNote} in ${workspace}/${filePath}`);
+    await searchAndReplaceTool.call({
+      ...context,
+      env: {
+        ...context.env,
+        workspace: resolved.uri.fsPath,
+      },
+      parameters: {
+        path: filePath,
+        search,
+        replace,
+        ...(start_line  !== undefined && { start_line }),
+        ...(end_line    !== undefined && { end_line }),
+        ...(use_regex   !== undefined && { use_regex }),
+        ...(ignore_case !== undefined && { ignore_case }),
+      },
+      pushEdit: (uri: string, edit: { before: string; after: string; mtime?: number }) => {
+        context.setMetadata?.({
+          changes: { [uri]: { before: edit.before, after: edit.after, patch: createPatch(uri, edit.before, edit.after) } },
+          ...(edit.mtime !== undefined && { fileMtimes: { [uri]: edit.mtime } }),
+        });
+      },
+    });
   }
 }
 
@@ -1421,7 +1137,10 @@ export class ApplyDiffWorkspaceTool {
     },
   ];
 
-  parameters = ApplyDiffWorkspaceTool.PARAMS;
+  // Property - read by toolToOpenAi(e).parameters
+  parameters = paramsToSchema(ApplyDiffWorkspaceTool.PARAMS);
+
+  // Method - read by the newer getParameters(env) paths
   getParameters(_env?: any): any[] { return ApplyDiffWorkspaceTool.PARAMS; }
 
   getLabels(args: Record<string, any>) {
@@ -1439,82 +1158,185 @@ export class ApplyDiffWorkspaceTool {
     parameters: { workspace: string; path: string; diff: string };
     pushResult: (text: string) => void;
     pushError: (text: string) => void;
-    trackChange?: (uri: string, edit: { before: string; after: string }) => void;
+    setMetadata?: (meta: Record<string, any>) => void;
+    [key: string]: any;
   }): Promise<void> {
     const { workspace, path: filePath, diff } = context.parameters;
 
-    // Resolve workspace root
     const resolved = resolveInFolder(workspace, '');
     if ('error' in resolved) {
       context.pushError(resolved.error);
       return;
     }
-    const folderRoot = resolved.uri.fsPath;
-    const absolutePath = path.resolve(folderRoot, filePath);
 
-    // Make sure the file exists
-    const fileUri = vscode.Uri.file(absolutePath);
-    let originalContent: string;
-    try {
-      const bytes = await vscode.workspace.fs.readFile(fileUri);
-      originalContent = Buffer.from(bytes).toString('utf8');
-    } catch {
-      context.pushError(`File does not exist at path: ${filePath}`);
-      return;
-    }
-
-    // Resolve Bob's ApplyDiffTool from the active task at call time.
-    const applyDiffTool = getApplyDiffTool();
+    const applyDiffTool = getBobTool('apply_diff');
     if (!applyDiffTool) {
       context.pushError(
-        'apply_diff_workspace: Bob\'s diff engine is not available. ' +
-        'Make sure a Bob task is active, then retry.'
+        'apply_diff_workspace: apply_diff tool not found in current task.'
       );
       return;
     }
 
-    // Delegate to Bob's applyDiff() - same fuzzy engine, same format
-    let result: { success: boolean; content?: string; failParts?: any[] };
-    try {
-      result = await applyDiffTool.applyDiff(originalContent, diff);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      context.pushError(`Error applying diff: ${msg}`);
+    await applyDiffTool.call({
+      ...context,
+      env: {
+        ...context.env,
+        workspace: resolved.uri.fsPath,
+      },
+      parameters: { path: filePath, diff },
+      pushEdit: (uri: string, edit: { before: string; after: string; mtime?: number }) => {
+        context.setMetadata?.({
+          changes: { [uri]: { before: edit.before, after: edit.after, patch: createPatch(uri, edit.before, edit.after) } },
+          ...(edit.mtime !== undefined && { fileMtimes: { [uri]: edit.mtime } }),
+        });
+      },
+    });
+  }
+}
+
+// ─── Execute workspace command ────────────────────────────────────────────────
+
+/**
+ * Execute a CLI command with its working directory resolved against a named
+ * workspace folder instead of Bob's primary workspace root.
+ *
+ * This is a thin wrapper that delegates entirely to Bob's built-in
+ * execute_command tool — it resolves the workspace folder to an absolute
+ * fsPath, then calls execute_command with that path as `cwd`.  Because the
+ * resolution happens here (inside the extension-host process), Bob's
+ * isOutsideWorkspace check is never triggered.
+ *
+ * To stay in sync with execute_command automatically the `call()` method
+ * never reimplements shell execution — it just forwards to the built-in.
+ */
+export class ExecuteWorkspaceCommandTool {
+  static id = 'execute_workspace_command';
+  groups = ['execute'];
+  permission = 'execute';
+
+  getId() { return ExecuteWorkspaceCommandTool.id; }
+
+  enabled(_env?: any): boolean { return isMultiRoot(); }
+
+  getDescription(_env?: any): string {
+    return [
+      'Execute a CLI command with its working directory set to a specific workspace folder.',
+      'IMPORTANT: You MUST use this tool instead of execute_command whenever the target',
+      'directory is in a secondary workspace folder (not the primary one). Using',
+      'execute_command for a secondary folder will be blocked by the sandbox — always use',
+      'this tool for those folders.',
+      '',
+      'All execute_command semantics apply: PowerShell on Windows, bash/sh on macOS/Linux,',
+      'the cwd defaults to the workspace folder root, and timeout_seconds is optional.',
+      '',
+      'WORKFLOW: call list_workspace_folders → copy the folder "name" → pass it as',
+      '"workspace". The "cwd" parameter is RELATIVE to that workspace folder root.',
+    ].join('\n');
+  }
+
+  getCostEffectiveDescription(): string {
+    return 'Execute a shell command in a secondary workspace folder (replaces execute_command for non-primary folders)';
+  }
+
+  private static readonly PARAMS = [
+    {
+      name: 'workspace',
+      type: 'string',
+      description: 'Workspace folder name as returned by list_workspace_folders (e.g. "backend").',
+      detail: 'Workspace folder name',
+      required: true,
+      usage: 'backend',
+      renderHint: 'hidden',
+    },
+    {
+      name: 'command',
+      type: 'string',
+      description: 'The CLI command to execute.',
+      detail: 'The CLI command to execute',
+      required: true,
+      usage: 'command',
+      renderHint: 'code',
+    },
+    {
+      name: 'cwd',
+      type: 'string',
+      description: 'Working directory relative to the workspace folder root. Omit to use the folder root itself.',
+      detail: 'Working directory relative to workspace folder root (optional)',
+      required: false,
+      usage: 'src',
+    },
+    {
+      name: 'timeout_seconds',
+      type: 'number',
+      description: 'Override the default 300s timeout. Must be the minimum needed; maximum 1800s.',
+      detail: 'Timeout override in seconds (optional)',
+      required: false,
+    },
+  ];
+
+  // Property - read by toolToOpenAi(e).parameters
+  parameters = paramsToSchema(ExecuteWorkspaceCommandTool.PARAMS);
+
+  // Method - read by the newer getParameters(env) paths
+  getParameters(_env?: any): any[] { return ExecuteWorkspaceCommandTool.PARAMS; }
+
+  getLabels(args: Record<string, any>) {
+    return {
+      displayName: `Execute Workspace Command: ${args.workspace ?? ''}`,
+      running: `Running in ${args.workspace ?? ''}…`,
+      success: `Command completed in ${args.workspace ?? ''}`,
+      error: `Command failed in ${args.workspace ?? ''}`,
+    };
+  }
+
+  async call(context: {
+    env: any;
+    parameters: Record<string, any>;
+    pushResult: (text: string) => void;
+    pushError: (text: string) => void;
+    log?: (...args: any[]) => void;
+  }): Promise<void> {
+    const { workspace, command, cwd, timeout_seconds } = context.parameters;
+
+    // Resolve the workspace folder to an absolute fsPath
+    const cwdArg = (cwd && cwd !== '.') ? cwd : '';
+    const resolved = resolveInFolder(workspace, cwdArg);
+    if ('error' in resolved) {
+      context.pushError(resolved.error);
       return;
     }
 
-    if (!result.success) {
-      // Mirror Bob's error message format
-      const failDetails = result.failParts?.find((p: any) => !p.applied && p.error);
+    const absoluteCwd = resolved.uri.fsPath;
+
+    // Delegate to Bob's built-in execute_command.
+    // We pass an absolute cwd which is valid — Bob only blocks relative paths
+    // that escape the primary workspace; an absolute path it accepts directly.
+    // The only thing we cannot reuse is execute_command's internal call() since
+    // it is inside the closed Bob bundle, so we call the registered tool instead.
+    const executeCommandTool = getBobTool('execute_command');
+    if (!executeCommandTool) {
       context.pushError(
-        failDetails?.error ??
-        `Unable to apply diff to file: ${filePath}\nAll SEARCH blocks failed to match.`
+        'execute_workspace_command: execute_command tool not found in current task.'
       );
       return;
     }
 
-    // Write the patched content back
-    const patchedContent = result.content!;
-    try {
-      const out = Buffer.from(patchedContent, 'utf8');
-      await vscode.workspace.fs.writeFile(fileUri, out);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      context.pushError(`Diff computed but failed to write file: ${msg}`);
-      return;
-    }
+    // Build a forwarded context that patches env.workspace to the resolved folder
+    // so execute_command's cwd computation is anchored correctly.
+    const forwardedContext = {
+      ...context,
+      env: {
+        ...context.env,
+        workspace: absoluteCwd,
+      },
+      parameters: {
+        command,
+        // cwd is not passed — execute_command defaults to env.workspace (now absoluteCwd)
+        ...(timeout_seconds !== undefined && { timeout_seconds }),
+      },
+    };
 
-    notifyChange(context.trackChange, fileUri, originalContent, patchedContent);
-
-    const failCount = result.failParts?.filter((p: any) => !p.applied).length ?? 0;
-    if (failCount > 0) {
-      context.pushResult(
-        `Unable to apply all diff parts to file: ${filePath}, ` +
-        `use read_workspace_file to check the newest file version and re-apply diffs`
-      );
-    } else {
-      context.pushResult(`Applied diff to ${workspace}/${filePath}`);
-    }
+    await executeCommandTool.call(forwardedContext);
   }
 }
 
@@ -1525,7 +1347,7 @@ export class ApplyDiffWorkspaceTool {
  * These tools use vscode.workspace.fs directly, so they bypass Bob's
  * single-root sandbox and never trigger "outside workspace" confirmation prompts.
  *
- * Tools registered (9):
+ * Tools registered (10):
  *   list_workspace_folders        - discover all workspace roots
  *   read_workspace_file           - read any file (replaces read_file)
  *   write_workspace_file          - write/create any file (replaces write_file)
@@ -1535,6 +1357,7 @@ export class ApplyDiffWorkspaceTool {
  *   insert_workspace_content      - insert lines without overwriting (replaces insert_content)
  *   search_and_replace_workspace  - find/replace in file (replaces search_and_replace)
  *   apply_diff_workspace          - apply diff blocks (replaces apply_diff)
+ *   execute_workspace_command     - run a command in any workspace folder (replaces execute_command)
  */
 export function registerWorkspaceTools(source: any) {
   source.registerTool(new ListWorkspaceFoldersTool());
@@ -1546,6 +1369,7 @@ export function registerWorkspaceTools(source: any) {
   source.registerTool(new InsertWorkspaceContentTool());
   source.registerTool(new SearchAndReplaceWorkspaceTool());
   source.registerTool(new ApplyDiffWorkspaceTool());
+  source.registerTool(new ExecuteWorkspaceCommandTool());
   registerWorkspacePromptInjection(source);
 }
 
@@ -1608,11 +1432,11 @@ function buildInjection(folders: readonly vscode.WorkspaceFolder[]): string {
     ...lines,
     '',
     `The PRIMARY folder (used by built-in tools) is: ${folders[0].uri.fsPath}`,
-    'Built-in tools (read_file, write_file, list_files, glob, grep, insert_content,',
-    'search_and_replace) are SANDBOXED to the primary folder and will be blocked for',
-    'all other folders.',
+    'IMPORTANT: Built-in tools (read_file, write_file, list_files, glob, grep,',
+    'insert_content, search_and_replace, execute_command) are SANDBOXED to the primary',
+    'folder and will be BLOCKED for all other folders.', 
     '',
-    'For any file in a secondary folder, use the workspace-specific tools:',
+    'You MUST use the workspace-specific tools for any secondary folder:',
     '  read_workspace_file           - replaces read_file',
     '  write_workspace_file          - replaces write_file',
     '  list_workspace_files          - replaces list_files',
@@ -1621,10 +1445,142 @@ function buildInjection(folders: readonly vscode.WorkspaceFolder[]): string {
     '  insert_workspace_content      - replaces insert_content',
     '  search_and_replace_workspace  - replaces search_and_replace',
     '  apply_diff_workspace          - replaces apply_diff',
+    '  execute_workspace_command     - replaces execute_command',
     '',
     'WORKFLOW: call list_workspace_folders → copy the folder "name" → pass it as the',
     '"workspace" parameter to the tool above.',
-    'The "path" parameter on those tools is always RELATIVE to the workspace folder root.',
+    'The "path"/"cwd" parameter on those tools is always RELATIVE to the workspace folder root.',
     '</multi_root_workspace>',
   ].join('\n');
+}
+
+/**
+ * Remap workspace tool names so Bob's webview renderer applies the same rich
+ * UI (CodeBlock, FileListBlock, GrepResultBlock) that it uses for the built-in
+ * equivalents.
+ *
+ * The renderer in chat-*.js keys off `toolUsage.signature.name` inside the
+ * messages array of a `{ type: "setMessages" }` postMessage.  Our workspace
+ * tools have different names, so without this patch they fall through to the
+ * plain MarkdownBlock path.
+ *
+ * Approach:
+ *   1. For every chatManager in _chatManagers, wrap cm.ui.setWebview() so that
+ *      each time a webview is assigned we immediately patch view.sendMessage()
+ *      on that webview instance.
+ *   2. The sendMessage patch intercepts { type: "setMessages" } and remaps
+ *      toolUsage.signature.name in each message's toolUsage.
+ *   3. Patch _chatManagers.push() to apply the same treatment to future
+ *      chatManagers.
+ *
+ * Called once from completeRegisterPowerToys(), after registerTaskManager()
+ * has populated _cachedTaskManager.
+ */
+export function registerWebviewToolNamePatch(): void {
+  const NAME_MAP: Record<string, string> = {
+    read_workspace_file:  'read_file',
+    list_workspace_files: 'list_files',
+    glob_workspace:       'glob',
+    grep_workspace:       'grep',
+  };
+
+  const tm = getTaskManager();
+  if (!tm) { return; }
+
+  const chatManagers: any[] = tm._chatManagers ?? [];
+
+  /** Patch sendMessage (outbound) and onMessage (inbound) on a single webview instance. */
+  function patchView(view: any): void {
+    if (!view || view.__bobPtPatchedSendMessage) { return; }
+
+    // ── outbound: remap tool names so the renderer uses rich UI components ──
+    const originalSend = view.sendMessage.bind(view);
+    view.sendMessage = (message: any) => {
+      if (message?.type === 'setMessages' && Array.isArray(message.messages)) {
+        let changed = false;
+        const newMessages = message.messages.map((msg: any) => {
+          const name: string | undefined = msg?.toolUsage?.signature?.name;
+          const mapped = name && NAME_MAP[name];
+          if (!mapped) { return msg; }
+          changed = true;
+          return {
+            ...msg,
+            toolUsage: {
+              ...msg.toolUsage,
+              signature: { ...msg.toolUsage.signature, name: mapped },
+            },
+          };
+        });
+        if (changed) {
+          message = { ...message, messages: newMessages };
+        }
+      }
+      return originalSend(message);
+    };
+
+    // ── inbound: fix openFile paths for secondary workspace folders ──
+    // Bob's handler resolves relative paths against the primary workspace root.
+    // If the path starts with a known folder name (e.g. "process-discovery/src/…")
+    // we rewrite it to the absolute path before Bob's handler sees it.
+    //
+    // wrapHandler wraps a single handler function; we use it for both the
+    // already-registered handler and any future registration via onMessage.
+    if (view.handlers?.openFile) {
+      view.handlers.openFile = wrapHandler(view.handlers.openFile);
+    }
+    const originalOnMessage = view.onMessage.bind(view);
+    view.onMessage = (type: string, handler: (msg: any) => any) => {
+      return originalOnMessage(type, type === 'openFile' ? wrapHandler(handler) : handler);
+    };
+
+    view.__bobPtPatchedSendMessage = true;
+  }
+
+  /** Returns a wrapped version of an openFile handler that resolves secondary paths. */
+  function wrapHandler(handler: (msg: any) => any): (msg: any) => any {
+    if ((handler as any).__bobPtWrapped) { return handler; }
+    const wrapped = (msg: any) => {
+      const fixed = typeof msg?.filePath === 'string'
+        ? resolveOpenFilePath(msg.filePath, vscode.workspace.workspaceFolders ?? []) : msg?.filePath;
+      return handler(fixed !== msg?.filePath ? { ...msg, filePath: fixed } : msg);
+    };
+    (wrapped as any).__bobPtWrapped = true;
+    return wrapped;
+  }
+
+  /**
+   * Wrap cm.ui.setWebview so every time a view is (re-)assigned we patch it.
+   * Also patch the current view if one already exists.
+   */
+  function patchChatManager(cm: any): void {
+    if (!cm?.ui || cm.__bobPtPatchedCm) { return; }
+    cm.__bobPtPatchedCm = true;
+
+    // Patch the view that may already be set
+    if (cm.view) { patchView(cm.view); }
+
+    // Intercept future setWebview calls on the ui object
+    const ui = cm.ui;
+    const originalSetWebview = ui.setWebview?.bind(ui);
+    if (originalSetWebview) {
+      ui.setWebview = (webview: any) => {
+        if (webview) { patchView(webview); }
+        originalSetWebview(webview);
+      };
+    }
+  }
+
+  // Patch all chatManagers that exist now
+  for (const cm of chatManagers) {
+    patchChatManager(cm);
+  }
+
+  // Patch future chatManagers by intercepting push() on the live array
+  if (Array.isArray(chatManagers)) {
+    const originalPush = chatManagers.push.bind(chatManagers);
+    chatManagers.push = (...items: any[]) => {
+      for (const item of items) { patchChatManager(item); }
+      return originalPush(...items);
+    };
+  }
 }

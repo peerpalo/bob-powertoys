@@ -12,11 +12,11 @@ export const logger = {
   error: (msg: string, ...args: unknown[]) => console.error(`${LOG_PREFIX} ${msg}`, ...args),
 };
 
-import * as vscode from 'vscode';
 import * as path from 'path';
-import * as cp from 'child_process';
-import * as readline from 'readline';
-import { access, stat } from 'fs/promises';
+import { existsSync } from 'fs';
+import { createPatch } from 'diff';
+
+export { createPatch };
 
 // Cached taskManager instance - populated once by initTaskManager(), reused everywhere.
 let _cachedTaskManager: any = null;
@@ -105,22 +105,23 @@ export function findTaskChatManager(taskManager: any, taskId: string): any | nul
   return null;
 }
 
-// ─── Bob's ApplyDiffTool extraction ──────────────────────────────────────────
+// ─── Bob built-in tool lookup ─────────────────────────────────────────────────
 
 /**
- * Resolves Bob's ApplyDiffTool instance at call time by walking the task
- * manager's live task graph:
+ * Resolves any registered Bob built-in tool instance at call time by walking
+ * the task manager's live task graph:
  *
  *   taskManager.mainPanelTask → chatManager
  *   chatManager.currentTask   → Task (has getTools())
  *   task.getTools()           → flat tool array
  *
  * Bob stores tools in a plain array on the Task object, not in the yZ map
- * registry. We look for the entry with id === "apply_diff".
+ * registry. We search by the tool's `id` field.
  *
- * Returns null if the task manager is not ready or no task is active yet.
+ * Returns null if the task manager is not ready, no task is active, or the
+ * requested tool is not present in the current mode.
  */
-export function getApplyDiffTool(): any {
+export function getBobTool(toolId: string): any {
   const taskManager = _cachedTaskManager;
   if (!taskManager) { return null; }
 
@@ -134,149 +135,7 @@ export function getApplyDiffTool(): any {
   if (!task) { return null; }
 
   const tools: any[] = task.getTools?.() ?? [];
-  return tools.find((t: any) => t.id === 'apply_diff') ?? null;
-}
-
-// ─── ripgrep binary resolution (mirrors Bob's own logic) ─────────────────────
-
-let _rgBinary: string | undefined;
-
-/**
- * Field separator used with ripgrep's --field-match-separator flag.
- * ASCII Unit Separator (0x1F) - matches Bob's GrepTool exactly, and is
- * safe on macOS, Linux, and Windows since it never appears in file paths
- * or source code.
- */
-export const RG_FIELD_SEP = '\x1f';
-
-/**
- * Resolves the ripgrep binary shipped with VS Code itself.
- * Uses the same candidate list as Bob's own GrepTool. Result is cached.
- */
-export async function resolveRipGrepBinary(): Promise<string | undefined> {
-  if (_rgBinary) { return _rgBinary; }
-  const exe = process.platform.startsWith('win') ? 'rg.exe' : 'rg';
-  const plat = `${process.platform}-${process.arch}`;
-  const appRoot = vscode.env.appRoot;
-  const candidates = [
-    path.join('node_modules/@vscode/ripgrep-universal/bin', plat, exe),
-    path.join('node_modules.asar.unpacked/@vscode/ripgrep-universal/bin', plat, exe),
-    path.join('node_modules/@vscode/ripgrep/bin', exe),
-    path.join('node_modules/vscode-ripgrep/bin', exe),
-    path.join('node_modules.asar.unpacked/vscode-ripgrep/bin', exe),
-    path.join('node_modules.asar.unpacked/@vscode/ripgrep/bin', exe),
-  ];
-  for (const rel of candidates) {
-    const full = path.join(appRoot, rel);
-    const found = await access(full).then(() => true, () => false);
-    if (found) { _rgBinary = full; return full; }
-  }
-  return undefined;
-}
-
-/**
- * Spawns ripgrep with the given args and returns all stdout as a string.
- * Kills the process after LINE_HARD_CAP lines to bound memory usage (mirrors Bob).
- * Rejects if there is no output (i.e. no matches).
- */
-export function spawnRipGrep(binary: string, args: string[], lineHardCap = 300): Promise<string> {
-  return new Promise((resolve, reject) => {
-    let proc: cp.ChildProcess;
-    try {
-      proc = cp.spawn(binary, args);
-    } catch (err) {
-      reject(err);
-      return;
-    }
-    const rl = readline.createInterface({ input: proc.stdout!, crlfDelay: Infinity });
-    let out = '';
-    let lineCount = 0;
-    rl.on('line', line => {
-      if (lineCount < lineHardCap) {
-        out += line + '\n';
-        lineCount++;
-      } else {
-        rl.close();
-        proc.kill();
-      }
-    });
-    let stderr = '';
-    proc.stderr!.on('data', d => { stderr += d.toString(); });
-    rl.on('close', () => {
-      out.trim() ? resolve(out) : reject(new Error(stderr || 'No matches'));
-    });
-    proc.on('error', err => reject(err));
-  });
-}
-
-/**
- * stat() a list of paths in parallel and return a Map<path, mtimeMs>.
- * Missing files are silently omitted.
- */
-export async function statMtimes(paths: string[]): Promise<Map<string, number>> {
-  const map = new Map<string, number>();
-  await Promise.all(paths.map(p => stat(p).then(s => map.set(p, s.mtimeMs)).catch(() => {})));
-  return map;
-}
-
-/**
- * Run ripgrep in --files mode (glob file search), collect paths sorted by mtime.
- * Mirrors Bob's GlobTool.exec + formatOutput:
- *   - hard cap at 2×maxResults lines before the process is killed
- *   - stat() all collected paths in parallel, sort newest-first, slice to maxResults
- * Returns the sorted absolute paths (may be fewer than maxResults if rg yields less).
- * Rejects if rg produces no output.
- */
-export async function ripGrepFiles(
-  binary: string,
-  args: string[],
-  maxResults: number
-): Promise<string[]> {
-  const hardCap = 2 * maxResults;
-  const collected: string[] = await new Promise((resolve, reject) => {
-    const proc = cp.spawn(binary, args);
-    const rl = readline.createInterface({ input: proc.stdout, crlfDelay: Infinity });
-    const lines: string[] = [];
-    rl.on('line', line => {
-      if (!line.trim()) { return; }
-      if (lines.length >= hardCap) { rl.close(); proc.kill(); return; }
-      lines.push(line);
-    });
-    let stderr = '';
-    proc.stderr.on('data', d => { stderr += d.toString(); });
-    rl.on('close', () => {
-      lines.length > 0 ? resolve(lines) : reject(new Error(stderr || 'No files found'));
-    });
-    proc.on('error', err => reject(err));
-  });
-
-  // stat in parallel, sort by mtime descending, slice to maxResults
-  const withMtime = await Promise.all(
-    collected.map(p => stat(p).then(s => ({ p, mtime: s.mtimeMs })).catch(() => ({ p, mtime: 0 })))
-  );
-  withMtime.sort((a, b) => b.mtime - a.mtime);
-  return withMtime.slice(0, maxResults).map(x => x.p);
-}
-
-/**
- * Build --ignore-file args for ripgrep, mirroring Bob's buildIgnoreFileArgs.
- * Adds .gitignore (when respectGitIgnore=true) and .bobignore from the workspace root.
- * Each file that exists on disk is passed as "--ignore-file <path>".
- */
-export async function buildIgnoreFileArgs(
-  workspaceRoot: string,
-  respectGitIgnore = true
-): Promise<string[]> {
-  const files: string[] = [];
-  if (respectGitIgnore) { files.push('.gitignore'); }
-  files.push('.bobignore');
-  const args: string[] = [];
-  for (const file of files) {
-    const full = path.join(workspaceRoot, file);
-    const found = await access(full).then(() => true, () => false);
-    if (found) { args.push('--ignore-file', full); }
-  }
-  return args;
+  return tools.find((t: any) => t.id === toolId) ?? null;
 }
 
 /**
@@ -316,4 +175,161 @@ export async function resolveFrameId(
   
   // Otherwise, resolve to top frame
   return await resolveTopFrame();
+}
+
+/**
+ * Convert a PARAMS array into the object-form OpenAI JSON Schema that Bob's
+ * `toolToOpenAi` passes through verbatim, preserving `usage`, `detail`, and
+ * `renderHint`.
+ *
+ * Background: `toolToOpenAi` detects `Array.isArray(o.parameters)` and, when
+ * true, only copies `{ type, description }` per entry — stripping everything
+ * else. When `o.parameters` is already a plain object it is returned as-is,
+ * so extra fields survive into the registered schema.
+ *
+ * Bob's registration then sets `getParameters: () => r` on the registered tool,
+ * so the tool's own `getParameters()` is never called by Bob's pipeline — only
+ * by our own code. All four fields must therefore live in the object returned here.
+ *
+ * Each entry in `params` should have:
+ * @param name        - parameter key, matches context.parameters key
+ * @param type        - 'string' | 'number' | 'boolean' | 'array'
+ * @param required    - if true, included in the schema's required[] array
+ * @param description - full sentence - sent to the LLM via toolToOpenAi() in extension.js (BobToolRegistry)
+ * @param detail      - short label  - shown in the approval dialog;
+ *                      read by getParameterRenderHints() in extension.js module 25772 (tool parameter utilities);
+ *                      paramsToSchema mirrors description/detail as fallback (each fills in for the other if missing)
+ * @param usage       - example value for autocomplete hints;
+ *                      sentinel 'command' triggers the Approve/Reject dialog;
+ *                      read by getParameterUses() in extension.js module 25772 (tool parameter utilities)
+ * @param renderHint  - optional, controls approval dialog field rendering;
+ *                      read by getParameterRenderHints() in extension.js module 25772 (tool parameter utilities):
+ *                        'code'   - single-line code block
+ *                        'diff'   - diff viewer
+ *                        'json'   - JSON viewer
+ *                        'text'   - plain text
+ *                        'hidden' - field not shown in dialog
+ *                        omit     - default name:value style
+ *                      if NO param has renderHint - entire tool falls back to
+ *                      a single raw JSON blob in the dialog
+ */
+export function paramsToSchema(params: ReadonlyArray<{
+  name:        string;
+  type:        string;
+  description?: string;
+  detail?:      string;
+  required?:    boolean;
+  usage?:       string;
+  renderHint?:  string;
+  [key: string]: unknown;
+}>) {
+  const properties: Record<string, any> = {};
+  for (const p of params) {
+    // `description` - read by toolToOpenAi() in extension.js (BobToolRegistry), sent to the LLM.
+    // `detail`      - read by getParameterRenderHints() in extension.js module 25772 as the field sub-label.
+    // Both must be present in the schema object so each pipeline finds what it expects.
+    const entry: Record<string, any> = {
+      type: p.type,
+      description: p.description ?? p.detail ?? '',
+      detail:      p.detail      ?? p.description ?? '',
+    };
+    if (p.usage)      { entry.usage      = p.usage; }
+    if (p.renderHint) { entry.renderHint = p.renderHint; }
+    properties[p.name] = entry;
+  }
+  return {
+    type: 'object',
+    additionalProperties: false,
+    properties,
+    required: params.filter(p => p.required).map(p => p.name),
+  };
+}
+
+// ─── Workspace path helpers (used by workspace tools + webview patch) ─────────
+
+/**
+ * Absolutise relative file paths in a glob or grep tool-result string.
+ *
+ * Bob's formatOutput / formatFilesOutput always writes one path per line
+ * (glob) or `<path>:` header lines (grep), using path.relative() — so every
+ * line is either a well-formed relative path or already absolute.
+ *
+ * @param content       Raw text returned by Bob's tool.
+ * @param tool          'glob' for glob/list_files output; 'grep' for grep output.
+ * @param workspaceRoot Absolute path of the folder the tool ran against.
+ */
+export function absolutiseToolContent(
+  content: string,
+  tool: 'glob' | 'grep',
+  workspaceRoot: string,
+): string {
+  if (!workspaceRoot || !content) { return content; }
+
+  if (tool === 'glob') {
+    // Each line is a path.relative() result — leave already-absolute lines alone.
+    return content.split('\n').map(line => {
+      const trimmed = line.trim();
+      if (!trimmed || path.isAbsolute(trimmed)) { return line; }
+      // If the line has no path separator but contains a space it is ambiguous:
+      // it could be a root-level filename with spaces ("My File.ts") or prose
+      // ("No files found").  Resolve the ambiguity with an existence check —
+      // only absolutise if the joined path actually exists on disk.
+      const hasSeparator = trimmed.includes('/') || trimmed.includes('\\');
+      if (!hasSeparator && trimmed.includes(' ')) {
+        const candidate = path.join(workspaceRoot, trimmed);
+        return existsSync(candidate) ? candidate : line;
+      }
+      return path.join(workspaceRoot, trimmed);
+    }).join('\n');
+  }
+
+  // grep: file-header lines are `<relPath>:` — strip the colon, absolutise, restore it.
+  return content.split('\n').map(line => {
+    if (!line.endsWith(':')) { return line; }
+    const filePath = line.slice(0, -1);
+    if (!filePath || path.isAbsolute(filePath)) { return line; }
+    // Same space-at-root ambiguity as the glob branch: a line like "My File.ts:"
+    // could be a valid file header or accidental prose ending with a colon.
+    // Only absolutise if the file actually exists on disk.
+    const hasSeparator = filePath.includes('/') || filePath.includes('\\');
+    if (!hasSeparator && filePath.includes(' ')) {
+      const candidate = path.join(workspaceRoot, filePath);
+      return existsSync(candidate) ? candidate + ':' : line;
+    }
+    return path.join(workspaceRoot, filePath) + ':';
+  }).join('\n');
+}
+
+/**
+ * Resolve a relative file path that starts with a known workspace folder name
+ * (e.g. `"./process-discovery/src/api/foo.js"`) to its absolute path.
+ *
+ * Bob's `kH()` resolver uses the primary workspace root for all relative paths,
+ * so clicks on secondary-folder file mentions open the wrong file.  This
+ * function is called before Bob's handler sees the path.
+ *
+ * The webview's `ct()` helper prepends `"./"` to all relative paths — we strip
+ * that prefix before matching against folder names.
+ *
+ * @param filePath  Path as received in the `openFile` webview message.
+ * @param folders   VS Code workspace folder list (pass `vscode.workspace.workspaceFolders`).
+ * @returns The absolute path if a folder-name match is found, otherwise `filePath` unchanged.
+ */
+export function resolveOpenFilePath(
+  filePath: string,
+  folders: ReadonlyArray<{ name: string; uri: { fsPath: string } }>,
+): string {
+  if (!filePath || path.isAbsolute(filePath)) { return filePath; }
+  // Strip the "./" prefix that the webview's ct() always prepends.
+  const stripped = filePath.replace(/^\.\//, '');
+  for (const folder of folders) {
+    const prefix = folder.name;
+    if (stripped === prefix ||
+        stripped.startsWith(prefix + '/') ||
+        stripped.startsWith(prefix + '\\')) {
+      const rel = stripped.slice(prefix.length).replace(/^[/\\]/, '');
+      return rel ? path.join(folder.uri.fsPath, rel) : folder.uri.fsPath;
+    }
+  }
+  return filePath;
 }

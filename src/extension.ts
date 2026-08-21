@@ -5,7 +5,7 @@ import { registerTerminalCapture, registerTerminalConsoleTools } from './tools/t
 import { registerBreakpointTools } from './tools/breakpoints.js';
 import { registerDebugControlTools } from './tools/debugControl.js';
 import { registerUniverseAnswerTool } from './tools/universeAnswer.js';
-import { registerWorkspaceTools } from './tools/workspace.js';
+import { registerWorkspaceTools, registerWebviewToolNamePatch } from './tools/workspace.js';
 import { registerDebugAdapterTracker } from './debugAdapter.js';
 import { registerTaskManager, EXTENSION_ID, EXTENSION_DISPLAY_NAME, logger } from './utils.js';
 import { registerTaskCommands, registerTaskPersistence, restoreTasks } from './taskManager.js';
@@ -119,8 +119,8 @@ async function registerPowerToys(context: vscode.ExtensionContext, bobExports: a
     registerDebugSessionTools(source);         // 4 tools
     registerTerminalConsoleTools(source);      // 4 tools
     registerUniverseAnswerTool(source);        // 1 tool
-    registerWorkspaceTools(source);            // 6 tools
-    logger.log('Successfully registered 30 tools with Bob');
+    registerWorkspaceTools(source);            // 10 tools
+    logger.log('Successfully registered 31 tools with Bob');
 
     await completeRegisterPowerToys(context, bobExports, source);
   } catch (error) {
@@ -166,6 +166,7 @@ async function completeRegisterPowerToys(
   registerTaskPersistence(context);
   await restoreTasks(context);
 
+  registerWebviewToolNamePatch();
   context.subscriptions.push(registerDebugAdapterTracker(bobExports));
   logger.log('Automatic breakpoint notifications enabled');
 
@@ -191,7 +192,7 @@ function showStatus() {
   const status = [
     `${EXTENSION_DISPLAY_NAME}:`,
     '',
-    '- Total Tools Registered: 30',
+    '- Total Tools Registered: 31',
     '- Automatic Breakpoint Notifications: Enabled',
     '- Active Debug Session: ' + sessionName,
     '- Breakpoints: ' + vscode.debug.breakpoints.length,

@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { paramsToSchema } from '../utils.js';
 
 // ─── Tool classes ────────────────────────────────────────────────────────────
 
@@ -159,7 +160,7 @@ export class StartDebugSessionTool {
   ];
 
   // Property - read by toolToOpenAi(e).parameters
-  parameters = StartDebugSessionTool.PARAMS;
+  parameters = paramsToSchema(StartDebugSessionTool.PARAMS);
 
   // Method - read by the newer getParameters(env) paths
   getParameters(_env?: any): any[] {

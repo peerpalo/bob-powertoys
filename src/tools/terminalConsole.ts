@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { paramsToSchema } from '../utils.js';
 
 const terminalOutputLog = new Map<vscode.Terminal, string[]>();
 const MAX_TERMINAL_OUTPUT_CHARS = 1000;
@@ -132,7 +133,7 @@ export class GetTerminalOutputTool {
   ];
 
   // Property - read by toolToOpenAi(e).parameters
-  parameters = GetTerminalOutputTool.PARAMS;
+  parameters = paramsToSchema(GetTerminalOutputTool.PARAMS);
 
   // Method - read by the newer getParameters(env) paths
   getParameters(_env?: any): any[] {
@@ -216,7 +217,7 @@ export class SearchTerminalOutputTool {
   ];
 
   // Property - read by toolToOpenAi(e).parameters
-  parameters = SearchTerminalOutputTool.PARAMS;
+  parameters = paramsToSchema(SearchTerminalOutputTool.PARAMS);
 
   // Method - read by the newer getParameters(env) paths
   getParameters(_env?: any): any[] {
@@ -330,7 +331,7 @@ export class FocusTerminalTool {
   ];
 
   // Property - read by toolToOpenAi(e).parameters
-  parameters = FocusTerminalTool.PARAMS;
+  parameters = paramsToSchema(FocusTerminalTool.PARAMS);
 
   // Method - read by the newer getParameters(env) paths
   getParameters(_env?: any): any[] {

@@ -10,7 +10,7 @@ bob-powertoys/
 │   ├── debugAdapter.ts           # Centralized debug adapter tracker
 │   ├── utils.ts                  # Shared utilities: taskManager access, frame resolution
 │   └── tools/                    # Individual tool modules
-│       ├── workspace.ts          # Multi-root workspace tools (6 tools + prompt injection)
+│       ├── workspace.ts          # Multi-root workspace tools (10 tools + prompt injection)
 │       ├── breakpoints.ts        # Breakpoint management (batch operations)
 │       ├── debugControl.ts       # Debug stepping & control
 │       ├── debugConsole.ts       # Debug console & variable inspection
@@ -259,6 +259,125 @@ export function getTaskManager(): any {
 
 ---
 
+## getBobTool — accessing Bob's built-in tools
+
+`getBobTool(toolId)` in [`src/utils.ts`](src/utils.ts) resolves any of Bob's registered built-in tool instances at call time by walking the live task graph:
+
+```
+taskManager.mainPanelTask - chatManager
+chatManager.currentTask   - Task (has getTools())
+task.getTools()           - flat tool array  ← search by id here
+```
+
+Bob stores all active tools in a plain array on the `Task` object. `getBobTool` finds the entry whose `.id` matches `toolId` and returns it, or `null` if the task manager is not ready, no task is active, or the tool is not present in the current mode.
+
+### Why this is needed
+
+Bob's built-in tools have complex internal implementations (fuzzy diff engine, `execa` shell runner, `DiagnosticDiff` captures, truncation detection, undo entry registration) that live inside the closed Bob bundle. Reimplementing them would be brittle and would silently diverge on every Bob update.
+
+Instead, every workspace tool resolves the live tool object at call-time via `getBobTool(id)` and delegates to its `call()` method, patching only what needs to change in the forwarded context.
+
+### Delegation pattern
+
+All callers follow the same three-step pattern:
+
+1. `resolveInFolder(workspace, '')` → get the secondary folder's absolute `fsPath`
+2. `getBobTool(toolId)` → get the live Bob tool instance
+3. `tool.call({ ...context, env: { ...context.env, workspace: fsPath }, parameters: { /* workspace stripped */ }, ... shims })` → forward
+
+**Context shims** bridge Bob's internal callbacks back to our context:
+
+| Shim | Used by | What it does |
+|---|---|---|
+| `trackFileRead(uri, mtime)` | `read_workspace_file` | Writes into `K.fileMtimes` via `context.setMetadata?.({ fileMtimes: { [uri]: mtime } })` |
+| `pushEdit(uri, { before, after, mtime })` | all edit tools | Writes into `K.changes` and `K.fileMtimes` via `context.setMetadata?.({ changes: { [uri]: ... }, fileMtimes: ... })` |
+
+### Current callers
+
+| Caller | `toolId` | What it patches |
+|---|---|---|
+| `ReadWorkspaceFileTool` | `'read_file'` | `env.workspace`, strips `workspace` param, adds `trackFileRead` shim |
+| `ListWorkspaceFilesTool` | `'list_files'` | `env.workspace`, strips `workspace` param |
+| `GlobWorkspaceTool` | `'glob'` | `env.workspace` per root (loops for all-folders case), strips `workspace` param |
+| `GrepWorkspaceTool` | `'grep'` | `env.workspace` per root (loops for all-folders case), strips `workspace` param |
+| `WriteWorkspaceFileTool` | `'write_file'` | `env.workspace`, strips `workspace` param, adds `pushEdit` shim |
+| `InsertWorkspaceContentTool` | `'insert_content'` | `env.workspace`, strips `workspace` param, adds `pushEdit` shim |
+| `SearchAndReplaceWorkspaceTool` | `'search_and_replace'` | `env.workspace`, strips `workspace` param, adds `pushEdit` shim |
+| `ApplyDiffWorkspaceTool` | `'apply_diff'` | `env.workspace`, strips `workspace` param, adds `pushEdit` shim |
+| `ExecuteWorkspaceCommandTool` | `'execute_command'` | `env.workspace` set to resolved `cwd`, strips `workspace` and `cwd` params |
+
+### Key internal objects accessed
+
+| Expression | What it is |
+|---|---|
+| `taskManager.mainPanelTask` | The sidebar chatManager (preferred); falls back to `_chatManagers[0]` |
+| `chatManager.currentTask` | The active `Task` object |
+| `task.getTools()` | Flat array of all tool instances registered for the current mode |
+| `tool.id` | String identifier matching what Bob exposes as the tool name |
+
+---
+
+## registerWebviewToolNamePatch — rich UI for workspace tool results
+
+Bob's webview renderer (`chat-*.js`) keys off `toolUsage.signature.name` to decide which rich component to render for a tool result. It hardcodes the built-in names (`"read_file"`, `"list_files"`, `"glob"`, `"grep"`) — tools with any other name fall through to a plain `MarkdownBlock`.
+
+`registerWebviewToolNamePatch()` in [`src/tools/workspace.ts`](src/tools/workspace.ts) does two things:
+1. **Name remapping** — intercepts outbound `{ type: "setMessages" }` messages and maps workspace tool names to their built-in equivalents so the rich renderer components (`FileListBlock`, `GrepResultBlock`, `CodeBlock`) are used.
+2. **Click-to-open path resolution** — intercepts inbound `{ type: "openFile" }` messages from the webview and resolves secondary-folder paths to their correct absolute location before Bob's own handler sees them.
+
+### Data flow — outbound (name remapping)
+
+```
+task messages (BobTask.getMessages())
+  └─► D5e.updateMessagesUi()
+        └─► aM.updateMessagesUi(tasks, workspace, getMessagesFn)
+              └─► aM.sendMessage({ type: "setMessages", taskId, messages })
+                    └─► webview HTML → React store → renderer
+```
+
+The messages array inside `{ type: "setMessages" }` contains raw task message objects. Each tool-result message has a `toolUsage.signature.name` field — this is what the renderer reads.
+
+### Data flow — inbound (click-to-open)
+
+```
+user clicks a path link in the chat UI
+  └─► webview ct() prepends "./" to relative paths
+        └─► acquireVsCodeApi().postMessage({ type: "openFile", filePath })
+              └─► aM.onMessage handler → resolveOpenFilePath(filePath, folders)
+                    └─► Bob's kH() resolver → vscode.open
+```
+
+Bob's `kH()` resolver always joins against the primary workspace root, so clicks on secondary-folder paths open the wrong file. `wrapHandler` intercepts the `openFile` message and calls `resolveOpenFilePath` (from `src/utils.ts`) to correct the path before Bob's handler fires.
+
+### Patch strategy
+
+1. **`patchView(view)`** — wraps `view.sendMessage` on a single `aM` (webview) instance. Intercepts `{ type: "setMessages" }`, maps each message's `toolUsage.signature.name` through `NAME_MAP`, and forwards the (possibly mutated) message object to the original. Also wraps `view.onMessage` so the `openFile` handler is replaced with `wrapHandler(originalHandler)`.
+
+2. **`patchChatManager(cm)`** — runs `patchView` on any view already assigned to `cm.ui`, then wraps `cm.ui.setWebview()` so every future view assignment is also patched immediately.
+
+3. **`_chatManagers.push` intercept** — catches chatManagers created after extension activation.
+
+4. **`wrapHandler(handler)`** — returns a new handler that calls `resolveOpenFilePath` on `openFile` messages, then delegates to the original handler.
+
+### NAME_MAP
+
+| Workspace tool | Renders as |
+|---|---|
+| `read_workspace_file` | `read_file` (CodeBlock) |
+| `list_workspace_files` | `list_files` (FileListBlock) |
+| `glob_workspace` | `glob` (FileListBlock) |
+| `grep_workspace` | `grep` (GrepResultBlock) |
+
+Edit tools (`write_workspace_file`, etc.) already get `DiffView` via `_meta.changes.patch` set by the `pushEdit` shim — no name remapping needed for them.
+
+### absolutiseToolContent — correct paths in FileListBlock / GrepResultBlock
+
+`FileListBlock` and `GrepResultBlock` render paths as clickable links using the raw text emitted by Bob's `formatOutput` / `formatFilesOutput`. Those functions write *relative* paths (via `path.relative(workspaceRoot, absPath)`), so links for secondary-folder tools point to the wrong location.
+
+The `pushResult` wrappers in `glob_workspace` and `grep_workspace` call `absolutiseToolContent(content, 'glob'|'grep', workspaceRoot)` (from `src/utils.ts`) to rewrite relative paths to absolute before the result is stored, so the rendered links are always correct regardless of which folder was searched.
+
+---
+
 ## System Prompt Injection
 
 Bob builds a new system message on **every turn**. There is no public API for appending to it - but we can mutate the message object directly once it exists.
@@ -399,7 +518,7 @@ This variable mirrors `globalState`. It drives the `bob-powertoys.hasLastSidebar
 
 ```typescript
 interface TabEntry { taskId: string; viewColumn: number; }
-type TabsStore = Record<string, TabEntry[]>; // windowKey → entries
+type TabsStore = Record<string, TabEntry[]>; // windowKey - entries
 ```
 
 `TABS_TASK_IDS_KEY` stores a `TabsStore` - a map from window fingerprint to the list of tab entries for that window. Each entry records both the task ID and its editor column so it can be restored to the same position.
@@ -538,7 +657,7 @@ restoreTasks(context): Promise<void>      // restores sidebar task + tab tasks; 
 **Internal types**:
 ```typescript
 interface TabEntry { taskId: string; viewColumn: number; }
-type TabsStore = Record<string, TabEntry[]>; // windowKey → entries
+type TabsStore = Record<string, TabEntry[]>; // windowKey - entries
 ```
 
 **Internal state**:
@@ -574,7 +693,7 @@ flushPendingNotifications(): Promise<void>
 
 ### 4. utils.ts
 
-**Purpose**: Shared utilities - taskManager lifecycle, chat manager lookup, Bob tool access, ripgrep helpers, frame resolution.
+**Purpose**: Shared utilities - taskManager lifecycle, chat manager lookup, Bob tool access, frame resolution, workspace path helpers.
 
 **Exported functions**:
 ```typescript
@@ -582,18 +701,11 @@ extractTaskManager(bobExports: any): any            // internal hack, sync
 registerTaskManager(bobExports: any): Promise<void> // resolves + caches, with retries
 getTaskManager(): any                               // returns cached instance
 findTaskChatManager(taskManager, taskId): any|null  // active + backgrounded lookup
-getApplyDiffTool(): any | null                      // resolves Bob's ApplyDiffTool from the active task at call time
-resolveRipGrepBinary(): Promise<string|undefined>   // finds the rg binary shipped with VS Code (cached)
-spawnRipGrep(binary, args, lineHardCap?): Promise<string>  // spawns rg, returns stdout; rejects on no matches
-ripGrepFiles(binary, args, maxResults): Promise<string[]>  // rg --files mode, sorted by mtime
-buildIgnoreFileArgs(workspaceRoot, respectGitIgnore?): Promise<string[]>  // --ignore-file args for .gitignore/.bobignore
-statMtimes(paths): Promise<Map<string, number>>     // stat() in parallel, returns mtime map
+getBobTool(toolId: string): any | null              // resolves any Bob built-in tool from the active task at call time
 resolveFrameId(frameId, resolveTopFrame): Promise<number|undefined>
-```
-
-**Constants**:
-```typescript
-RG_FIELD_SEP: '\x1f'   // field separator for ripgrep -nH output (ASCII Unit Separator)
+normaliseWorkspacePath(filePath: string): string    // normalises user-supplied relative paths for vscode.Uri.joinPath
+absolutiseToolContent(content, tool, workspaceRoot): string  // absolutises relative paths in glob/grep tool output
+resolveOpenFilePath(filePath, folders): string      // resolves ./folderName/... webview click paths to absolute
 ```
 
 ### 4. Bob's Tool Interface
@@ -603,14 +715,55 @@ Each tool implements:
 ```typescript
 class MyTool {
   static id = 'my_tool';
-  groups = ['read']; // or ['edit']
-  parameters = [{ name, required, type, description, usage }];
+  groups = ['read'];       // or ['edit'] / ['execute']
+  permission = 'read';     // or 'edit' / 'execute'
 
-  getId(): string
-  getDescription(options?: any): string      // full system-prompt description
-  getCostEffectiveDescription(): string      // brief description for tool selection
-  toolUseDescription(params: any): string    // shown during execution
-  async call(context: { parameters, pushResult, pushError }): Promise<void>
+  getId(): string { return MyTool.id; }
+  enabled(_env?: any): boolean { return true; }  // optional: hide tool when false
+  getDescription(_env?: any): string { ... }     // full description in system prompt
+  getCostEffectiveDescription(): string { ... }  // brief one-liner for tool selection
+
+  private static readonly PARAMS = [
+    {
+      name:        'param1',            // parameter key used in context.parameters
+      type:        'string',            // 'string' | 'number' | 'boolean' | 'array'
+      required:    true,                // false or omit - optional
+      description: 'Full sentence sent to the LLM.',   // read by toolToOpenAi - LLM schema
+      detail:      'Short label in approval UI.',      // read by module 25772 - approval dialog label
+      usage:       'example value',                    // autocomplete hint shown in UI
+                                                       // special sentinel: 'command' - triggers Approve/Reject dialog
+      renderHint:  'code',                             // optional — controls approval dialog rendering:
+                                                       //   'code'   - single-line code block (commands, paths)
+                                                       //   'diff'   - diff viewer
+                                                       //   'json'   - JSON viewer
+                                                       //   'text'   - plain text
+                                                       //   'hidden' - not shown (e.g. workspace name, already in title)
+                                                       //   omit     - default: paramName: value style
+                                                       // if NO param in the tool has renderHint - raw JSON blob fallback
+    },
+  ];
+
+  // Property - read by toolToOpenAi(e).parameters
+  parameters = paramsToSchema(MyTool.PARAMS);
+
+  // Method - read by the newer getParameters(env) paths
+  getParameters(_env?: any): any[] { return MyTool.PARAMS; }
+
+  getLabels(args: Record<string, any>) {
+    return {
+      displayName: `My Tool: ${args.param1}`,
+      running:     `Running with ${args.param1}…`,
+      success:     `Done: ${args.param1}`,
+      error:       `Failed: ${args.param1}`,
+    };
+  }
+
+  async call(context: {
+    env: any;
+    parameters: Record<string, any>;
+    pushResult: (text: string) => void;
+    pushError:  (text: string) => void;
+  }): Promise<void> { ... }
 }
 ```
 
@@ -618,18 +771,18 @@ class MyTool {
 
 | File | Tools | Count |
 |---|---|---|
-| `workspace.ts` | `list_workspace_folders`, `read_workspace_file`, `write_workspace_file`, `list_workspace_files`, `glob_workspace`, `grep_workspace`, `insert_workspace_content`, `search_and_replace_workspace`, `apply_diff_workspace` | 9 |
+| `workspace.ts` | `list_workspace_folders`, `read_workspace_file`, `write_workspace_file`, `list_workspace_files`, `glob_workspace`, `grep_workspace`, `insert_workspace_content`, `search_and_replace_workspace`, `apply_diff_workspace`, `execute_workspace_command` | 10 |
 | `breakpoints.ts` | `set_breakpoints`, `remove_breakpoints`, `list_breakpoints` | 3 |
 | `debugControl.ts` | `step_over`, `step_into`, `step_out`, `continue_execution`, `pause_execution` | 5 |
 | `debugConsole.ts` | `evaluate_expression`, `get_variables`, `get_stack_trace`, `get_scopes`, `set_variable`, `get_debug_output` | 6 |
 | `debugSession.ts` | `get_active_debug_session`, `list_debug_configurations`, `start_debug_session`, `stop_debug_session` | 4 |
 | `terminalConsole.ts` | `list_terminals`, `get_terminal_output`, `search_terminal_output`, `focus_terminal` | 4 |
 | `universeAnswer.ts` | `answer_to_life_universe_and_everything` | 1 |
-| **Total** | | **32** |
+| **Total** | | **33** |
 
 ---
 
-## Complete Tool Reference (32 Tools)
+## Complete Tool Reference (33 Tools)
 
 ### Breakpoint Tools (3)
 | Tool | Description |
@@ -673,7 +826,7 @@ class MyTool {
 | `search_terminal_output` | Search terminal output for a pattern |
 | `focus_terminal` | Focus a specific terminal |
 
-### Multi-Root Workspace Tools (9)
+### Multi-Root Workspace Tools (10)
 
 > **Visibility**: These tools are only active in multi-root VS Code workspaces (2+ root folders).
 > They are completely hidden from the LLM in single-root workspaces via the `enabled()` method.
@@ -689,8 +842,9 @@ class MyTool {
 | `insert_workspace_content` | Insert lines at a specific position in a file in any workspace folder (replaces `insert_content`) |
 | `search_and_replace_workspace` | Find-and-replace text (literal or regex) in a file in any workspace folder (replaces `search_and_replace`) |
 | `apply_diff_workspace` | Apply a SEARCH/REPLACE diff block to a file in any workspace folder using Bob's fuzzy diff engine (replaces `apply_diff`) |
+| `execute_workspace_command` | Run a CLI command with its working directory in any workspace folder (replaces `execute_command` for non-primary folders) |
 
-All nine tools accept a `workspace` parameter (the folder `name` from `list_workspace_folders`) and a `path` relative to that folder root. `glob_workspace` and `grep_workspace` also accept an optional `workspace` param - omit it to search all folders at once. `apply_diff_workspace` requires an active Bob task to be running (it delegates to Bob's internal diff engine at call time).
+All ten tools accept a `workspace` parameter (the folder `name` from `list_workspace_folders`) and a `path`/`cwd` relative to that folder root. `glob_workspace` and `grep_workspace` also accept an optional `workspace` param — omit it to search all folders at once. All tools except `list_workspace_folders` delegate entirely to the corresponding Bob built-in via `getBobTool`, so output format, error messages, undo tracking, and future improvements are inherited automatically.
 
 ### Easter Egg (1)
 | Tool | Description |
@@ -756,16 +910,19 @@ class MyNewTool {
   static id = 'my_new_tool';
   groups = ['read']; // or ['edit']
   permission = 'read'; // or 'edit'
-  parameters = [
+  private static readonly PARAMS = [
     {
       name: 'param1',
       required: true,
       type: 'string',
-      description: 'What this parameter does',
-      detail: 'Short hint shown in the UI',
-      usage: 'example value'
+      description: 'Full sentence sent to the LLM in the function schema.',
+      detail: 'Short label shown in the approval UI.',
+      usage: 'example value',
+      // renderHint: 'code' | 'diff' | 'json' | 'text' | 'hidden'
     }
   ];
+  parameters = paramsToSchema(MyNewTool.PARAMS);
+  getParameters(_env?: any): any[] { return MyNewTool.PARAMS; }
 
   getId(): string { return MyNewTool.id; }
 
@@ -808,6 +965,81 @@ source.registerTool(new MyNewTool());
 ```
 
 3. **Update the count** in `extension.ts` and in this document.
+
+### Parameter fields: `description`, `detail`, `usage`, `renderHint`
+
+Bob's pipeline has **two completely separate consumers** of the PARAMS data, each reading different fields:
+
+| Field | Required | Read by | Purpose |
+|---|---|---|---|
+| `description` | ✅ | `toolToOpenAi()` in extension.js (BobToolRegistry) - LLM function schema | Full sentence describing the parameter, sent to the model. |
+| `detail` | ✅ | `getParameterRenderHints()` in extension.js module 25772 (tool parameter utilities) | Short label shown beneath the field value in the approval dialog. |
+| `usage` | ⬜ | `getParameterUses()` in extension.js module 25772 (tool parameter utilities) | Example value for autocomplete hints. Special sentinel: `'command'` triggers the **Approve / Reject / Approve for task** dialog. |
+| `renderHint` | ⬜ | `getParameterRenderHints()` in extension.js module 25772 (tool parameter utilities) | Controls field rendering: `'code'` (code block), `'diff'` (diff view), `'json'` (JSON viewer), `'text'` (plain text), `'hidden'` (not shown). |
+
+Always define **both** `description` and `detail`. `paramsToSchema()` (see below) mirrors each into the other as a fallback, so a param with only one field still works — but having both gives the best experience.
+
+**`renderHint` is optional per-parameter**, but its presence on at least one parameter in the tool determines whether the approval dialog renders individually or falls back to a raw JSON blob:
+
+- **At least one param has `renderHint`** - formatted view: each param rendered according to its hint; params without a hint get the default `name: value` style.
+- **No param has `renderHint`** - entire tool falls back to a single collapsible JSON blob.
+- `'hidden'` suppresses a param entirely from the dialog (e.g. `workspace` — already shown in the tool title).
+- `usage: 'command'` is **independent** of `renderHint` — it only controls whether the approval dialog fires, not how it looks.
+
+#### Why `parameters` must not be the raw PARAMS array
+
+Bob's source-tool registration pipeline (`Rzn` in the bundle) calls `BobToolRegistry.toolToOpenAi(o)` to produce the OpenAI JSON Schema. That function inspects `o.parameters`:
+
+```
+toolToOpenAi(o):
+  if (typeof o.parameters === 'object' && !Array.isArray(o.parameters))
+    - return o.parameters as-is          ← object passthrough: all fields preserved ✓
+  if (Array.isArray(o.parameters))
+    - convert: only copies { type, description } per entry  ← usage/detail/renderHint STRIPPED ✗
+```
+
+The resulting schema `r` is then registered as `getParameters: () => r`. Bob's UI renderer and approval pipeline **only ever call `registeredTool.getParameters()`**, which returns `r` — your tool's own `getParameters()` method is **never called by Bob**.
+
+If `parameters` is set to the raw array, `usage`, `detail`, and `renderHint` are all stripped, causing:
+- The approval dialog to never fire for `permission = 'execute'` tools (missing `usage: 'command'` sentinel).
+- Parameters to render as a raw JSON blob instead of individual formatted fields.
+
+#### `paramsToSchema()` in `utils.ts`
+
+`paramsToSchema()` (exported from `src/utils.ts`) converts a PARAMS array into the correct object form, preserving all four fields and mirroring `description`↔`detail` as fallbacks:
+
+```typescript
+// src/utils.ts
+export function paramsToSchema(params: ReadonlyArray<{
+  name: string; type: string;
+  description?: string; detail?: string;
+  required?: boolean; usage?: string; renderHint?: string;
+  [key: string]: unknown;
+}>): object
+```
+
+Use it for every tool — the pattern is the same across all tool files:
+
+```typescript
+private static readonly PARAMS = [
+  { name: 'workspace', type: 'string', required: true,
+    description: 'Workspace folder name…',  // - LLM schema
+    detail:      'Workspace folder name',   // - approval UI label
+    usage:       'backend',
+    renderHint:  'hidden' },
+  { name: 'command', type: 'string', required: true,
+    description: 'The CLI command to execute.',
+    detail:      'The CLI command to execute',
+    usage:       'command',   // ← sentinel: triggers Approve/Reject dialog
+    renderHint:  'code' },
+];
+
+// Property - read by toolToOpenAi(e).parameters
+parameters = paramsToSchema(MyTool.PARAMS);
+
+// Method - read by the newer getParameters(env) paths
+getParameters(_env?: any): any[] { return MyTool.PARAMS; }
+```
 
 ### Conditionally visible tools (`enabled()`)
 
