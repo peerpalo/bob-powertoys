@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { resolveFrameId } from '../utils.js';
+import { resolveFrameId, paramsToSchema } from '../utils.js';
 import { getCurrentStoppedState } from '../debugAdapter.js';
 
 // Store debug output from DAP
@@ -54,7 +54,7 @@ export class EvaluateExpressionTool {
   ];
 
   // Property - read by toolToOpenAi(e).parameters
-  parameters = EvaluateExpressionTool.PARAMS;
+  parameters = paramsToSchema(EvaluateExpressionTool.PARAMS);
 
   // Method - read by the newer getParameters(env) paths
   getParameters(_env?: any): any[] {
@@ -142,7 +142,7 @@ export class GetVariablesTool {
   ];
 
   // Property - read by toolToOpenAi(e).parameters
-  parameters = GetVariablesTool.PARAMS;
+  parameters = paramsToSchema(GetVariablesTool.PARAMS);
 
   // Method - read by the newer getParameters(env) paths
   getParameters(_env?: any): any[] {
@@ -205,7 +205,7 @@ export class GetStackTraceTool {
   ];
 
   // Property - read by toolToOpenAi(e).parameters
-  parameters = GetStackTraceTool.PARAMS;
+  parameters = paramsToSchema(GetStackTraceTool.PARAMS);
 
   // Method - read by the newer getParameters(env) paths
   getParameters(_env?: any): any[] {
@@ -288,7 +288,7 @@ export class GetScopesTool {
   ];
 
   // Property - read by toolToOpenAi(e).parameters
-  parameters = GetScopesTool.PARAMS;
+  parameters = paramsToSchema(GetScopesTool.PARAMS);
 
   // Method - read by the newer getParameters(env) paths
   getParameters(_env?: any): any[] {
@@ -359,7 +359,7 @@ export class SetVariableTool {
   ];
 
   // Property - read by toolToOpenAi(e).parameters
-  parameters = SetVariableTool.PARAMS;
+  parameters = paramsToSchema(SetVariableTool.PARAMS);
 
   // Method - read by the newer getParameters(env) paths
   getParameters(_env?: any): any[] {
@@ -427,7 +427,7 @@ export class GetDebugOutputTool {
   ];
 
   // Property - read by toolToOpenAi(e).parameters
-  parameters = GetDebugOutputTool.PARAMS;
+  parameters = paramsToSchema(GetDebugOutputTool.PARAMS);
 
   // Method - read by the newer getParameters(env) paths
   getParameters(_env?: any): any[] {
