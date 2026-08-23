@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { paramsToSchema } from '../utils.js';
 
 // ─── Tool classes ────────────────────────────────────────────────────────────
 
@@ -21,7 +22,7 @@ export class StepOverTool {
   private static readonly PARAMS: any[] = [];
 
   // Property - read by toolToOpenAi(e).parameters
-  parameters = StepOverTool.PARAMS;
+  parameters = paramsToSchema(StepOverTool.PARAMS);
 
   // Method - read by the newer getParameters(env) paths
   getParameters(_env?: any): any[] {
@@ -77,7 +78,7 @@ export class StepIntoTool {
   private static readonly PARAMS: any[] = [];
 
   // Property - read by toolToOpenAi(e).parameters
-  parameters = StepIntoTool.PARAMS;
+  parameters = paramsToSchema(StepIntoTool.PARAMS);
 
   // Method - read by the newer getParameters(env) paths
   getParameters(_env?: any): any[] {
@@ -133,7 +134,7 @@ export class StepOutTool {
   private static readonly PARAMS: any[] = [];
 
   // Property - read by toolToOpenAi(e).parameters
-  parameters = StepOutTool.PARAMS;
+  parameters = paramsToSchema(StepOutTool.PARAMS);
 
   // Method - read by the newer getParameters(env) paths
   getParameters(_env?: any): any[] {
@@ -189,7 +190,7 @@ export class ContinueTool {
   private static readonly PARAMS: any[] = [];
 
   // Property - read by toolToOpenAi(e).parameters
-  parameters = ContinueTool.PARAMS;
+  parameters = paramsToSchema(ContinueTool.PARAMS);
 
   // Method - read by the newer getParameters(env) paths
   getParameters(_env?: any): any[] {
@@ -245,7 +246,7 @@ export class PauseTool {
   private static readonly PARAMS: any[] = [];
 
   // Property - read by toolToOpenAi(e).parameters
-  parameters = PauseTool.PARAMS;
+  parameters = paramsToSchema(PauseTool.PARAMS);
 
   // Method - read by the newer getParameters(env) paths
   getParameters(_env?: any): any[] {

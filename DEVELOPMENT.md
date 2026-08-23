@@ -773,16 +773,17 @@ class MyTool {
 |---|---|---|
 | `workspace.ts` | `list_workspace_folders`, `read_workspace_file`, `write_workspace_file`, `list_workspace_files`, `glob_workspace`, `grep_workspace`, `insert_workspace_content`, `search_and_replace_workspace`, `apply_diff_workspace`, `execute_workspace_command` | 10 |
 | `breakpoints.ts` | `set_breakpoints`, `remove_breakpoints`, `list_breakpoints` | 3 |
-| `debugControl.ts` | `step_over`, `step_into`, `step_out`, `continue_execution`, `pause_execution` | 5 |
+| `debugControl.ts` | `step_over`, `step_into`, `step_out`, `continue`, `pause` | 5 |
 | `debugConsole.ts` | `evaluate_expression`, `get_variables`, `get_stack_trace`, `get_scopes`, `set_variable`, `get_debug_output` | 6 |
 | `debugSession.ts` | `get_active_debug_session`, `list_debug_configurations`, `start_debug_session`, `stop_debug_session` | 4 |
 | `terminalConsole.ts` | `list_terminals`, `get_terminal_output`, `search_terminal_output`, `focus_terminal` | 4 |
-| `universeAnswer.ts` | `answer_to_life_universe_and_everything` | 1 |
-| **Total** | | **33** |
+| `bobExtensions.ts` | `list_extensions` | 1 |
+| `universeAnswer.ts` | `universe_answer` | 1 |
+| **Total** | | **34** |
 
 ---
 
-## Complete Tool Reference (33 Tools)
+## Complete Tool Reference (34 Tools)
 
 ### Breakpoint Tools (3)
 | Tool | Description |
@@ -797,8 +798,8 @@ class MyTool {
 | `step_over` | Step over the current line |
 | `step_into` | Step into a function call |
 | `step_out` | Step out of the current function |
-| `continue_execution` | Continue execution until next breakpoint |
-| `pause_execution` | Pause a running debug session |
+| `continue` | Continue execution until next breakpoint |
+| `pause` | Pause a running debug session |
 
 ### Debug Console Tools (6)
 | Tool | Description |
@@ -846,10 +847,15 @@ class MyTool {
 
 All ten tools accept a `workspace` parameter (the folder `name` from `list_workspace_folders`) and a `path`/`cwd` relative to that folder root. `glob_workspace` and `grep_workspace` also accept an optional `workspace` param — omit it to search all folders at once. All tools except `list_workspace_folders` delegate entirely to the corresponding Bob built-in via `getBobTool`, so output format, error messages, undo tracking, and future improvements are inherited automatically.
 
+### Bob Extensions (1)
+| Tool | Description |
+|---|---|
+| `list_extensions` | List all installed Bob extensions with optional filter by name/ID |
+
 ### Easter Egg (1)
 | Tool | Description |
 |---|---|
-| `answer_to_life_universe_and_everything` | Returns 42 |
+| `universe_answer` | Returns 42 |
 
 ---
 
@@ -868,7 +874,10 @@ npm install
 ### Build
 ```bash
 npm run compile          # one-shot build
-npm run watch            # watch mode
+npm run typecheck        # type-check without emitting
+npm run lint             # lint src/
+npm run lint:fix         # lint and auto-fix
+npm run watch            # watch mode (background)
 ```
 
 ### Running the Extension
@@ -894,7 +903,7 @@ npm run watch            # watch mode
 [PowerToys for Bob] setCurrentTasks intercepted, tasks: 1
 [PowerToys for Bob] Saving last task: <taskId>
 [PowerToys for Bob] Restoring last task: <taskId>
-[PowerToys for Bob] Successfully registered 29 tools with Bob
+[PowerToys for Bob] Successfully registered 34 tools with Bob
 ```
 
 ---

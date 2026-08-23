@@ -1,9 +1,6 @@
 import * as vscode from 'vscode';
 import { resolveFrameId, paramsToSchema } from '../utils.js';
-import { getCurrentStoppedState } from '../debugAdapter.js';
-
-// Store debug output from DAP
-const debugOutputLog: { category: string; output: string; timestamp: Date }[] = [];
+import { getCurrentStoppedState, getRecentDebugOutput } from '../debugAdapter.js';
 
 /**
  * Resolve the top frame ID from the active debug session
@@ -449,15 +446,8 @@ export class GetDebugOutputTool {
     pushResult: (text: string) => void;
     pushError: (text: string) => void;
   }): Promise<void> {
-    const { lines = 100, category } = context.parameters;
-
-    let entries = debugOutputLog;
-    if (category) {
-      entries = entries.filter(e => e.category === category);
-    }
-
-    const recent = entries.slice(-lines);
-    const text = recent.map(e => `[${e.category}] ${e.output}`).join('');
+    const { lines = 100 } = context.parameters;
+    const text = getRecentDebugOutput(lines);
     context.pushResult(text || '(no debug output captured yet)');
   }
 }

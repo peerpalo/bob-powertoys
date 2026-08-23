@@ -6,6 +6,7 @@ import { registerBreakpointTools } from './tools/breakpoints.js';
 import { registerDebugControlTools } from './tools/debugControl.js';
 import { registerUniverseAnswerTool } from './tools/universeAnswer.js';
 import { registerWorkspaceTools, registerWebviewToolNamePatch } from './tools/workspace.js';
+import { registerBobExtensionsTools } from './tools/bobExtensions.js';
 import { registerDebugAdapterTracker } from './debugAdapter.js';
 import { registerTaskManager, EXTENSION_ID, EXTENSION_DISPLAY_NAME, logger } from './utils.js';
 import { registerTaskCommands, registerTaskPersistence, restoreTasks } from './taskManager.js';
@@ -120,7 +121,8 @@ async function registerPowerToys(context: vscode.ExtensionContext, bobExports: a
     registerTerminalConsoleTools(source);      // 4 tools
     registerUniverseAnswerTool(source);        // 1 tool
     registerWorkspaceTools(source);            // 10 tools
-    logger.log('Successfully registered 31 tools with Bob');
+    registerBobExtensionsTools(source);        // 1 tool
+    logger.log('Successfully registered 34 tools with Bob');
 
     await completeRegisterPowerToys(context, bobExports, source);
   } catch (error) {
@@ -192,7 +194,7 @@ function showStatus() {
   const status = [
     `${EXTENSION_DISPLAY_NAME}:`,
     '',
-    '- Total Tools Registered: 31',
+    '- Total Tools Registered: 34',
     '- Automatic Breakpoint Notifications: Enabled',
     '- Active Debug Session: ' + sessionName,
     '- Breakpoints: ' + vscode.debug.breakpoints.length,

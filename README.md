@@ -81,7 +81,7 @@ PowerToys for Bob solves this by providing ten workspace-aware tools that use th
 
 ## Available Tools
 
-Bob has access to 33 tools organized in 6 categories:
+Bob has access to 34 tools organized in 7 categories:
 
 ### Breakpoint Management (3 tools)
 - `set_breakpoints` - Set multiple breakpoints with optional conditions
@@ -130,12 +130,15 @@ Bob has access to 33 tools organized in 6 categories:
 - `apply_diff_workspace` - Apply a SEARCH/REPLACE diff block to any file using Bob's fuzzy diff engine
 - `execute_workspace_command` - Execute a CLI command with its working directory set to a specific workspace folder
 
+### Bob Extensions (1 tool)
+- `list_extensions` - List all installed Bob extensions with optional filter by name or ID
+
 For detailed tool documentation and parameters, see [DEVELOPMENT.md](DEVELOPMENT.md).
 
 ## Requirements
 
-- IBM Bob 2.0.0 or higher
-- Node.js 20.x or higher
+- IBM Bob 2.0.2 or higher
+- Node.js 24.x or higher
 
 ## Development
 

@@ -30,8 +30,8 @@ export function registerTerminalCapture(context: vscode.ExtensionContext) {
               }
             }
           }
-        } catch (error) {
-          // Ignore errors
+        } catch {
+          // Ignore errors from shell execution stream
         }
       })();
     })
@@ -74,7 +74,7 @@ export class ListTerminalsTool {
   private static readonly PARAMS: any[] = [];
 
   // Property - read by toolToOpenAi(e).parameters
-  parameters = ListTerminalsTool.PARAMS;
+  parameters = paramsToSchema(ListTerminalsTool.PARAMS);
 
   // Method - read by the newer getParameters(env) paths
   getParameters(_env?: any): any[] {
