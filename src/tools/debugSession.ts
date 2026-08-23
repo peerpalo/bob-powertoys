@@ -22,7 +22,7 @@ export class GetActiveDebugSessionTool {
   private static readonly PARAMS: any[] = [];
 
   // Property - read by toolToOpenAi(e).parameters
-  parameters = GetActiveDebugSessionTool.PARAMS;
+  parameters = paramsToSchema(GetActiveDebugSessionTool.PARAMS);
 
   // Method - read by the newer getParameters(env) paths
   getParameters(_env?: any): any[] {
@@ -81,7 +81,7 @@ export class ListDebugConfigurationsTool {
   private static readonly PARAMS: any[] = [];
 
   // Property - read by toolToOpenAi(e).parameters
-  parameters = ListDebugConfigurationsTool.PARAMS;
+  parameters = paramsToSchema(ListDebugConfigurationsTool.PARAMS);
 
   // Method - read by the newer getParameters(env) paths
   getParameters(_env?: any): any[] {
@@ -311,7 +311,7 @@ export class StopDebugSessionTool {
   private static readonly PARAMS: any[] = [];
 
   // Property - read by toolToOpenAi(e).parameters
-  parameters = StopDebugSessionTool.PARAMS;
+  parameters = paramsToSchema(StopDebugSessionTool.PARAMS);
 
   // Method - read by the newer getParameters(env) paths
   getParameters(_env?: any): any[] {

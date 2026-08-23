@@ -16,9 +16,6 @@ const MAX_OUTPUT_LOG_SIZE = 100;
 // Reference to Bob's exports for breakpoint notifications
 let bobExportsRef: any = null;
 
-// Queue for notifications that arrive while Bob is streaming
-const pendingNotifications: string[] = [];
-
 /**
  * Get the current stopped state (used by debug tools)
  */
@@ -123,31 +120,6 @@ async function notifyBobOfBreakpointHit(
   } catch (error) {
     logger.error('Error notifying Bob:', error);
     return false;
-  }
-}
-
-/**
- * Flush any queued notifications once Bob is idle again.
- * Call this periodically or hook it to a task event.
- */
-export async function flushPendingNotifications(): Promise<void> {
-  if (pendingNotifications.length === 0) return;
-
-  const taskManager = getTaskManager();
-  if (!taskManager?.getChatManagerByTaskId) return;
-
-  // Drain the queue, grouped by taskId
-  const queued = pendingNotifications.splice(0, pendingNotifications.length);
-
-  // Attempt to deliver each to the task it belongs to (best-effort)
-  for (const message of queued) {
-    // Extract taskId from the message prefix if present, otherwise skip
-    const match = message.match(/^\[task:(.+?)\] /);
-    if (!match) continue;
-    const ownerTaskId = match[1];
-    const chatManager = taskManager.getChatManagerByTaskId(ownerTaskId);
-    if (!chatManager) continue;
-    await safeNotify(chatManager, ownerTaskId, message.replace(/^\[task:.+?\] /, ''));
   }
 }
 
