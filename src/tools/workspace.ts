@@ -216,7 +216,7 @@ export class ReadWorkspaceFileTool {
       return;
     }
 
-    const readFileTool = getBobTool('read_file');
+    const readFileTool = getBobTool(context.env.id, 'read_file');
     if (!readFileTool) {
       context.pushError(
         'read_workspace_file: read_file tool not found in current task.'
@@ -333,7 +333,7 @@ export class ListWorkspaceFilesTool {
       return;
     }
 
-    const listFilesTool = getBobTool('list_files');
+    const listFilesTool = getBobTool(context.env.id, 'list_files');
     if (!listFilesTool) {
       context.pushError(
         'list_workspace_files: list_files tool not found in current task.'
@@ -438,7 +438,7 @@ export class GlobWorkspaceTool {
       return;
     }
 
-    const globTool = getBobTool('glob');
+    const globTool = getBobTool(context.env.id, 'glob');
     if (!globTool) {
       context.pushError('glob_workspace: glob tool not found in current task.');
       return;
@@ -624,7 +624,7 @@ export class GrepWorkspaceTool {
     const { pattern, workspace, path: subPath, include,
             ignore_case, invert_match, word_regexp, files_with_matches } = context.parameters;
 
-    const grepTool = getBobTool('grep');
+    const grepTool = getBobTool(context.env.id, 'grep');
     if (!grepTool) {
       context.pushError('grep_workspace: grep tool not found in current task.');
       return;
@@ -790,7 +790,7 @@ export class WriteWorkspaceFileTool {
       return;
     }
 
-    const writeFileTool = getBobTool('write_file');
+    const writeFileTool = getBobTool(context.env.id, 'write_file');
     if (!writeFileTool) {
       context.pushError('write_workspace_file: write_file tool not found in current task.');
       return;
@@ -909,7 +909,7 @@ export class InsertWorkspaceContentTool {
       return;
     }
 
-    const insertContentTool = getBobTool('insert_content');
+    const insertContentTool = getBobTool(context.env.id, 'insert_content');
     if (!insertContentTool) {
       context.pushError('insert_workspace_content: insert_content tool not found in current task.');
       return;
@@ -1056,7 +1056,7 @@ export class SearchAndReplaceWorkspaceTool {
       return;
     }
 
-    const searchAndReplaceTool = getBobTool('search_and_replace');
+    const searchAndReplaceTool = getBobTool(context.env.id, 'search_and_replace');
     if (!searchAndReplaceTool) {
       context.pushError('search_and_replace_workspace: search_and_replace tool not found in current task.');
       return;
@@ -1169,7 +1169,7 @@ export class ApplyDiffWorkspaceTool {
       return;
     }
 
-    const applyDiffTool = getBobTool('apply_diff');
+    const applyDiffTool = getBobTool(context.env.id, 'apply_diff');
     if (!applyDiffTool) {
       context.pushError(
         'apply_diff_workspace: apply_diff tool not found in current task.'
@@ -1313,7 +1313,7 @@ export class ExecuteWorkspaceCommandTool {
     // that escape the primary workspace; an absolute path it accepts directly.
     // The only thing we cannot reuse is execute_command's internal call() since
     // it is inside the closed Bob bundle, so we call the registered tool instead.
-    const executeCommandTool = getBobTool('execute_command');
+    const executeCommandTool = getBobTool(context.env.id, 'execute_command');
     if (!executeCommandTool) {
       context.pushError(
         'execute_workspace_command: execute_command tool not found in current task.'

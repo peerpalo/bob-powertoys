@@ -16,6 +16,7 @@ bob-powertoys/
 │       ├── debugConsole.ts       # Debug console & variable inspection
 │       ├── debugSession.ts       # Debug session management
 │       ├── terminalConsole.ts    # Terminal output capture & search
+│       ├── bobExtensions.ts      # list_extensions tool
 │       └── universeAnswer.ts     # Easter egg tool
 ├── out/                          # Compiled JavaScript output
 ├── .vscode/
@@ -261,15 +262,17 @@ export function getTaskManager(): any {
 
 ## getBobTool — accessing Bob's built-in tools
 
-`getBobTool(toolId)` in [`src/utils.ts`](src/utils.ts) resolves any of Bob's registered built-in tool instances at call time by walking the live task graph:
+`getBobTool(taskId, toolId)` in [`src/utils.ts`](src/utils.ts) resolves any of Bob's registered built-in tool instances at call time by walking the live task graph:
 
 ```
-taskManager.mainPanelTask - chatManager
-chatManager.currentTask   - Task (has getTools())
-task.getTools()           - flat tool array  ← search by id here
+findTaskChatManager(taskId) → chatManager → currentTask → getTools()
+                                                              ↓
+                                                    search by .id here
 ```
 
-Bob stores all active tools in a plain array on the `Task` object. `getBobTool` finds the entry whose `.id` matches `toolId` and returns it, or `null` if the task manager is not ready, no task is active, or the tool is not present in the current mode.
+`taskId` (`context.env.id`) is **mandatory**. It is used to find the exact chatManager running the current task via `findTaskChatManager`, which checks both active and backgrounded states. Without it, the old approach (`taskManager.mainPanelTask`) always returned the sidebar chatManager — which has no `currentTask` for tab-based tasks — causing lookup failures after context compaction.
+
+Bob stores all active tools in a plain array on the `Task` object. `getBobTool` finds the entry whose `.id` matches `toolId` and returns it, or `null` if the task manager is not ready, the task is not found, or the tool is not present in the current mode.
 
 ### Why this is needed
 
@@ -282,7 +285,7 @@ Instead, every workspace tool resolves the live tool object at call-time via `ge
 All callers follow the same three-step pattern:
 
 1. `resolveInFolder(workspace, '')` → get the secondary folder's absolute `fsPath`
-2. `getBobTool(toolId)` → get the live Bob tool instance
+2. `getBobTool(context.env.id, toolId)` → get the live Bob tool instance for this task
 3. `tool.call({ ...context, env: { ...context.env, workspace: fsPath }, parameters: { /* workspace stripped */ }, ... shims })` → forward
 
 **Context shims** bridge Bob's internal callbacks back to our context:
@@ -310,7 +313,7 @@ All callers follow the same three-step pattern:
 
 | Expression | What it is |
 |---|---|
-| `taskManager.mainPanelTask` | The sidebar chatManager (preferred); falls back to `_chatManagers[0]` |
+| `findTaskChatManager(taskManager, taskId)` | Finds the chatManager by task ID (active or backgrounded) |
 | `chatManager.currentTask` | The active `Task` object |
 | `task.getTools()` | Flat array of all tool instances registered for the current mode |
 | `tool.id` | String identifier matching what Bob exposes as the tool name |
@@ -701,7 +704,7 @@ extractTaskManager(bobExports: any): any            // internal hack, sync
 registerTaskManager(bobExports: any): Promise<void> // resolves + caches, with retries
 getTaskManager(): any                               // returns cached instance
 findTaskChatManager(taskManager, taskId): any|null  // active + backgrounded lookup
-getBobTool(toolId: string): any | null              // resolves any Bob built-in tool from the active task at call time
+getBobTool(taskId: string, toolId: string): any | null  // resolves a Bob built-in tool for the given task (context.env.id)
 resolveFrameId(frameId, resolveTopFrame): Promise<number|undefined>
 normaliseWorkspacePath(filePath: string): string    // normalises user-supplied relative paths for vscode.Uri.joinPath
 absolutiseToolContent(content, tool, workspaceRoot): string  // absolutises relative paths in glob/grep tool output
@@ -1066,6 +1069,14 @@ Bob evaluates `enabled?.(env) ?? true` at tool-list build time. A tool returning
 ---
 
 ## Troubleshooting
+
+### Workspace proxy tools fail after context compaction (`read_file tool not found`)
+
+Symptom: `read_workspace_file` (and other `*_workspace` tools) return `"read_file tool not found in current task"` after the conversation has been running for a while. The calls complete in 1–3 ms (no I/O — pure lookup failure).
+
+Cause: This happened when `getBobTool` navigated via `taskManager.mainPanelTask` (the sidebar chatManager). Tasks running in editor tabs (`isPanel === true`) have a different chatManager — the sidebar one has no `currentTask` for them. After context compaction the model switches from calling `read_file` directly to calling `read_workspace_file`, which hit this broken lookup path.
+
+Fix (current): `getBobTool` now takes a mandatory `taskId` parameter and routes via `findTaskChatManager(taskManager, taskId)`, which finds the correct chatManager regardless of whether the task is in the sidebar or a tab.
 
 ### taskManager is null on startup
 `extractTaskManager` can return null if Bob's chat panel hasn't rendered yet when `setChatContent` is called. `registerTaskManager` automatically retries up to 3 times with 1s delays. If it still fails after 3 attempts, the status bar shows an error icon and breakpoint notifications are disabled - but all other tools still work.

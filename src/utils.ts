@@ -108,27 +108,21 @@ export function findTaskChatManager(taskManager: any, taskId: string): any | nul
 // ─── Bob built-in tool lookup ─────────────────────────────────────────────────
 
 /**
- * Resolves any registered Bob built-in tool instance at call time by walking
- * the task manager's live task graph:
+ * Resolves a registered Bob built-in tool instance by walking the task graph:
  *
- *   taskManager.mainPanelTask → chatManager
- *   chatManager.currentTask   → Task (has getTools())
- *   task.getTools()           → flat tool array
+ *   findTaskChatManager(taskId) → chatManager → currentTask → getTools()
  *
- * Bob stores tools in a plain array on the Task object, not in the yZ map
- * registry. We search by the tool's `id` field.
+ * taskId (context.env.id) is mandatory so the lookup is always routed to the
+ * exact chatManager running the current task — sidebar or editor tab.
  *
- * Returns null if the task manager is not ready, no task is active, or the
+ * Returns null if the task manager is not ready, the task is not found, or the
  * requested tool is not present in the current mode.
  */
-export function getBobTool(toolId: string): any {
+export function getBobTool(taskId: string, toolId: string): any {
   const taskManager = _cachedTaskManager;
   if (!taskManager) { return null; }
 
-  // Prefer the main panel chat manager; fall back to the first available one.
-  const chatManager: any =
-    taskManager.mainPanelTask ??
-    taskManager._chatManagers?.[0];
+  const chatManager: any = findTaskChatManager(taskManager, taskId);
   if (!chatManager) { return null; }
 
   const task = chatManager.currentTask;
