@@ -10,7 +10,8 @@ bob-powertoys/
 │   ├── debugAdapter.ts           # Centralized debug adapter tracker
 │   ├── utils.ts                  # Shared utilities: taskManager access, frame resolution
 │   └── tools/                    # Individual tool modules
-│       ├── workspace.ts          # Multi-root workspace tools (10 tools + prompt injection)
+│       ├── workspace.ts          # Multi-root workspace tools (11 tools + prompt injection)
+│       ├── videos.ts             # Video frame extraction tools (2 tools)
 │       ├── breakpoints.ts        # Breakpoint management (batch operations)
 │       ├── debugControl.ts       # Debug stepping & control
 │       ├── debugConsole.ts       # Debug console & variable inspection
@@ -297,17 +298,20 @@ All callers follow the same three-step pattern:
 
 ### Current callers
 
-| Caller | `toolId` | What it patches |
+| Caller | Delegates to | What it patches |
 |---|---|---|
-| `ReadWorkspaceFileTool` | `'read_file'` | `env.workspace`, strips `workspace` param, adds `trackFileRead` shim |
-| `ListWorkspaceFilesTool` | `'list_files'` | `env.workspace`, strips `workspace` param |
-| `GlobWorkspaceTool` | `'glob'` | `env.workspace` per root (loops for all-folders case), strips `workspace` param |
-| `GrepWorkspaceTool` | `'grep'` | `env.workspace` per root (loops for all-folders case), strips `workspace` param |
-| `WriteWorkspaceFileTool` | `'write_file'` | `env.workspace`, strips `workspace` param, adds `pushEdit` shim |
-| `InsertWorkspaceContentTool` | `'insert_content'` | `env.workspace`, strips `workspace` param, adds `pushEdit` shim |
-| `SearchAndReplaceWorkspaceTool` | `'search_and_replace'` | `env.workspace`, strips `workspace` param, adds `pushEdit` shim |
-| `ApplyDiffWorkspaceTool` | `'apply_diff'` | `env.workspace`, strips `workspace` param, adds `pushEdit` shim |
-| `ExecuteWorkspaceCommandTool` | `'execute_command'` | `env.workspace` set to resolved `cwd`, strips `workspace` and `cwd` params |
+| `ReadWorkspaceFileTool` | `getBobTool('read_file')` | `env.workspace`, strips `workspace` param, adds `trackFileRead` shim |
+| `ListWorkspaceFilesTool` | `getBobTool('list_files')` | `env.workspace`, strips `workspace` param |
+| `GlobWorkspaceTool` | `getBobTool('glob')` | `env.workspace` per root (loops for all-folders case), strips `workspace` param |
+| `GrepWorkspaceTool` | `getBobTool('grep')` | `env.workspace` per root (loops for all-folders case), strips `workspace` param |
+| `WriteWorkspaceFileTool` | `getBobTool('write_file')` | `env.workspace`, strips `workspace` param, adds `pushEdit` shim |
+| `InsertWorkspaceContentTool` | `getBobTool('insert_content')` | `env.workspace`, strips `workspace` param, adds `pushEdit` shim |
+| `SearchAndReplaceWorkspaceTool` | `getBobTool('search_and_replace')` | `env.workspace`, strips `workspace` param, adds `pushEdit` shim |
+| `ApplyDiffWorkspaceTool` | `getBobTool('apply_diff')` | `env.workspace`, strips `workspace` param, adds `pushEdit` shim |
+| `ExecuteWorkspaceCommandTool` | `getBobTool('execute_command')` | `env.workspace` set to resolved `cwd`, strips `workspace` and `cwd` params |
+| `ReadVideoFileWorkspaceTool` | `new ReadVideoFileTool().call(...)` directly | `env.workspace` — cannot use `getBobTool` here (see note below) |
+
+> **Why `read_workspace_video_file` does not use `getBobTool`**: Bob wraps every registered tool's `call` with a closure that calls `t.getEnvs()` to rebuild `env` from the live task at call time. This means any `env` object you pass in (including your patched `env.workspace`) is silently discarded. For Bob's own built-in tools this is fine — they read `env.workspace` from `t.getEnvs()` which is exactly what the wrapper sets. But `read_video_file` is *our* tool, so calling it through the wrapper would give it the unpatched primary workspace. The fix is to instantiate `ReadVideoFileTool` directly and call its `call()` method, bypassing the wrapper entirely.
 
 ### Key internal objects accessed
 
@@ -458,6 +462,72 @@ source.onTurnStart((taskId: string, _envs: any, isEmpty: boolean) => {
 | `source.onTurnEnd` + prepend | Turn is already finished; LLM never sees the update |
 | Long `setTimeout` (e.g. 200 ms) | Brittle - slow machines may miss it; fast machines waste time |
 | **Poll with `setTimeout(0)` × 50** | **Works - system message typically appears within 1–3 polls (~10–30 ms)** |
+
+---
+
+## Built-in Tool Redirect Guard
+
+### Problem
+
+Bob's sandbox setting **Allow outside workspace tool requests** (`outsideWorkspaceAllowed`) has two modes:
+
+| Setting | Behaviour |
+|---|---|
+| **OFF** | Bob rejects any built-in tool call whose path is outside the primary workspace root, returning a clear sandbox error. The model reads the error and self-corrects to `read_workspace_file`. |
+| **ON** | Bob passes sandbox validation silently. The built-in tool (`read_file`, etc.) resolves the path against the primary root, either reading the wrong file or producing a confusing OS-level "not found" error. The model does not learn to switch tools. |
+
+This makes correct behaviour dependent on a user setting the model can't observe.
+
+### Solution
+
+[`registerBuiltinToolRedirectGuard()`](src/tools/workspace.ts) registers a `source.onToolWillExecute` hook that fires **before** Bob's sandbox check. When any sandboxed built-in tool is called with a path that resolves inside a secondary workspace folder, the hook cancels the call and returns an explicit, actionable error message — regardless of the `outsideWorkspaceAllowed` setting.
+
+### `onToolWillExecute` hook
+
+Confirmed from Bob internals (`extension.js`):
+
+```
+async onToolCallHandler(source, toolOwner, toolCall):
+  toolId = toolCall.signature.name
+  result = await Registry.onToolWillExecute(manager.getEnvs(), toolId, toolCall.signature.arguments)
+  if result === true || result?.cancel === true → abort
+  if result is object without cancel → treat as override context
+  ... proceed to sandbox validation
+```
+
+Callback signature:
+
+```typescript
+source.onToolWillExecute(
+  (env: any, toolId: string, args: Record<string, any>) =>
+    { cancel: true; message: string } | undefined
+)
+```
+
+Returning `{ cancel: true }` aborts execution before the sandbox runs. The `message` field is surfaced to the model as a tool error.
+
+### `BUILTIN_REDIRECTS` map
+
+Defined once in [`src/tools/workspace.ts`](src/tools/workspace.ts) and used by both the guard and `buildInjection` (the system-prompt text):
+
+```typescript
+const BUILTIN_REDIRECTS: Record<string, { replacement: string; pathParam: string }> = {
+  read_file:          { replacement: 'read_workspace_file',          pathParam: 'path' },
+  write_file:         { replacement: 'write_workspace_file',         pathParam: 'path' },
+  // ... (all sandboxed builtins, including read_video_file → pathParam: 'video_path')
+  execute_command:    { replacement: 'execute_workspace_command',    pathParam: 'cwd' },
+};
+```
+
+`execute_command` uses `cwd` as the path parameter because that is what determines which folder a shell command runs in. `read_video_file` uses `video_path`.
+
+### Path resolution
+
+Relative paths are resolved against the primary workspace root (matching how Bob's built-in tools would resolve them). Absolute paths are used as-is. A path matches a secondary folder only when it equals the folder's `fsPath` exactly, or starts with `fsPath + path.sep` — preventing false matches against folders whose names share a common prefix (e.g. `/src/backend` must not match `/src/backend-v2`).
+
+### Testability
+
+The VS Code–dependent folder lookup is isolated to the thin `registerBuiltinToolRedirectGuard` wrapper. The pure detection logic lives in the exported [`checkBuiltinToolRedirect(toolId, args, folders)`](src/tools/workspace.ts) function, which takes the folders array as a parameter and has no VS Code dependency. See [`test/builtin-redirect-guard.test.ts`](test/builtin-redirect-guard.test.ts).
 
 ---
 
@@ -774,7 +844,8 @@ class MyTool {
 
 | File | Tools | Count |
 |---|---|---|
-| `workspace.ts` | `list_workspace_folders`, `read_workspace_file`, `write_workspace_file`, `list_workspace_files`, `glob_workspace`, `grep_workspace`, `insert_workspace_content`, `search_and_replace_workspace`, `apply_diff_workspace`, `execute_workspace_command` | 10 |
+| `workspace.ts` | `list_workspace_folders`, `read_workspace_file`, `write_workspace_file`, `list_workspace_files`, `glob_workspace`, `grep_workspace`, `insert_workspace_content`, `search_and_replace_workspace`, `apply_diff_workspace`, `execute_workspace_command`, `read_workspace_video_file` | 11 |
+| `videos.ts` | `read_video_file` | 1 |
 | `breakpoints.ts` | `set_breakpoints`, `remove_breakpoints`, `list_breakpoints` | 3 |
 | `debugControl.ts` | `step_over`, `step_into`, `step_out`, `continue`, `pause` | 5 |
 | `debugConsole.ts` | `evaluate_expression`, `get_variables`, `get_stack_trace`, `get_scopes`, `set_variable`, `get_debug_output` | 6 |
@@ -782,11 +853,11 @@ class MyTool {
 | `terminalConsole.ts` | `list_terminals`, `get_terminal_output`, `search_terminal_output`, `focus_terminal` | 4 |
 | `bobExtensions.ts` | `list_extensions` | 1 |
 | `universeAnswer.ts` | `universe_answer` | 1 |
-| **Total** | | **34** |
+| **Total** | | **36** |
 
 ---
 
-## Complete Tool Reference (34 Tools)
+## Complete Tool Reference (36 Tools)
 
 ### Breakpoint Tools (3)
 | Tool | Description |
@@ -830,7 +901,7 @@ class MyTool {
 | `search_terminal_output` | Search terminal output for a pattern |
 | `focus_terminal` | Focus a specific terminal |
 
-### Multi-Root Workspace Tools (10)
+### Multi-Root Workspace Tools (11)
 
 > **Visibility**: These tools are only active in multi-root VS Code workspaces (2+ root folders).
 > They are completely hidden from the LLM in single-root workspaces via the `enabled()` method.
@@ -847,8 +918,14 @@ class MyTool {
 | `search_and_replace_workspace` | Find-and-replace text (literal or regex) in a file in any workspace folder (replaces `search_and_replace`) |
 | `apply_diff_workspace` | Apply a SEARCH/REPLACE diff block to a file in any workspace folder using Bob's fuzzy diff engine (replaces `apply_diff`) |
 | `execute_workspace_command` | Run a CLI command with its working directory in any workspace folder (replaces `execute_command` for non-primary folders) |
+| `read_workspace_video_file` | Extract video frames from any workspace folder (replaces `read_video_file` for non-primary folders) |
 
-All ten tools accept a `workspace` parameter (the folder `name` from `list_workspace_folders`) and a `path`/`cwd` relative to that folder root. `glob_workspace` and `grep_workspace` also accept an optional `workspace` param — omit it to search all folders at once. All tools except `list_workspace_folders` delegate entirely to the corresponding Bob built-in via `getBobTool`, so output format, error messages, undo tracking, and future improvements are inherited automatically.
+Tools `list_workspace_folders` through `execute_workspace_command` delegate entirely to the corresponding Bob built-in via `getBobTool`, inheriting output format, error messages, undo tracking, and future improvements automatically. `read_workspace_video_file` is different: it calls `new ReadVideoFileTool().call(...)` directly instead of going through `getBobTool`, because Bob wraps registered tools and re-injects `env` from the live task at call time — which would discard the patched `env.workspace`. See **Delegation pattern** below.
+
+### Video Analysis Tools (1)
+| Tool | Description |
+|---|---|
+| `read_video_file` | Extract frames from a video file using ffmpeg for visual analysis. Evenly-spaced by default; supports custom `-vf` filters and `-ss` seek. Requires ffmpeg on PATH. |
 
 ### Bob Extensions (1)
 | Tool | Description |
