@@ -1,10 +1,10 @@
 # PowerToys for Bob
 
-Enhanced development tools for [IBM Bob](https://bob.ibm.com/): debugging, terminal access, multi-root workspace support, and quality-of-life improvements.
+Enhanced development tools for [IBM Bob](https://bob.ibm.com/): debugging, terminal access, multi-root workspace support, video analysis, and quality-of-life improvements.
 
 ## What is PowerToys for Bob?
 
-PowerToys for Bob is an IBM Bob extension that **supercharges your development workflow**. It supports multi-root workspaces, letting Bob read, write, search files, and run commands across all your workspace folders seamlessly. It adds quality-of-life improvements like detaching the chat panel to a separate OS window and automatically restoring the last active task on reopen. It also gives Bob direct access to your debugging sessions so it can set breakpoints, inspect variables, control execution, and read terminal output: all without manual copy-pasting.
+PowerToys for Bob is an IBM Bob extension that **supercharges your development workflow**. It supports multi-root workspaces, letting Bob read, write, search files, and run commands across all your workspace folders seamlessly. It adds quality-of-life improvements like detaching the chat panel to a separate OS window and automatically restoring the last active task on reopen. It gives Bob direct access to your debugging sessions so it can set breakpoints, inspect variables, control execution, and read terminal output - all without manual copy-pasting. It can also extract and analyze frames from video files, so you can ask Bob to inspect recordings, screen captures, or any video directly.
 
 > **Disclaimer:** PowerToys for Bob is a personal project. It is not affiliated with, endorsed by, or supported by IBM.
 
@@ -17,6 +17,7 @@ PowerToys for Bob is an IBM Bob extension that **supercharges your development w
 - **Terminal Access**: Read and search terminal output
 - **Automatic Breakpoint Notifications**: Bob is notified when breakpoints are hit
 - **Multi-Root Workspace Support**: Read, write, and search files across all workspace folders without per-file confirmation prompts
+- **Video Analysis**: Extract and analyze frames from video files - ask Bob to inspect recordings, screen captures, or debug videos
 - **Open Task in New Window**: Detach Bob's chat panel to a separate OS window so you can move it to another monitor
 - **Restore Last Task**: Bob automatically reopens the task you were working on when you restart the application
 
@@ -79,9 +80,11 @@ When you open a Bob workspace with **multiple root folders at different paths on
 
 PowerToys for Bob solves this by providing ten workspace-aware tools that use the VS Code filesystem API directly, with no sandbox restrictions. The tools are **automatically hidden** in single-root workspaces - they consume no tokens and cannot be called when there is only one folder.
 
+A **built-in tool redirect guard** intercepts any call to a sandboxed built-in tool (`read_file`, `write_file`, `glob`, `grep`, `execute_command`, etc.) whose path resolves inside a secondary folder, and immediately cancels it with a clear error message pointing to the correct `_workspace` equivalent. This works regardless of the *Allow outside workspace tool requests* setting: the model self-corrects on the first wrong call instead of silently reading from the wrong location.
+
 ## Available Tools
 
-Bob has access to 34 tools organized in 7 categories:
+Bob has access to 36 tools organized in 8 categories:
 
 ### Breakpoint Management (3 tools)
 - `set_breakpoints` - Set multiple breakpoints with optional conditions
@@ -115,7 +118,7 @@ Bob has access to 34 tools organized in 7 categories:
 - `search_terminal_output` - Search terminal with regex
 - `focus_terminal` - Bring terminal into focus
 
-### Multi-Root Workspace (10 tools)
+### Multi-Root Workspace (11 tools)
 
 > These tools are **only active in multi-root workspaces** (2+ root folders). They are invisible to Bob in single-root workspaces.
 
@@ -129,6 +132,10 @@ Bob has access to 34 tools organized in 7 categories:
 - `search_and_replace_workspace` - Find-and-replace text (literal or regex) in any file in any workspace folder
 - `apply_diff_workspace` - Apply a SEARCH/REPLACE diff block to any file using Bob's fuzzy diff engine
 - `execute_workspace_command` - Execute a CLI command with its working directory set to a specific workspace folder
+- `read_workspace_video_file` - Extract and analyze video frames from any workspace folder (replaces `read_video_file` for non-primary folders)
+
+### Video Analysis (1 tool)
+- `read_video_file` - Extract frames from a video file for visual analysis. Ask Bob things like "can you check why this happens?" with a video path. Requires ffmpeg on PATH.
 
 ### Bob Extensions (1 tool)
 - `list_extensions` - List all installed Bob extensions with optional filter by name or ID

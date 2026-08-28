@@ -11,7 +11,9 @@
  */
 
 import * as vscode from 'vscode';
+import * as path from 'path';
 import { getTaskManager, findTaskChatManager, getBobTool, normaliseWorkspacePath, paramsToSchema, createPatch, absolutiseToolContent, resolveOpenFilePath } from '../utils.js';
+import { ReadVideoFileTool, DEFAULT_VIDEO_FRAMES } from './videos.js';
 
 /** Return all workspace folder roots as { name, uri, fsPath, index } objects. */
 function getWorkspaceFolders() {
@@ -1347,7 +1349,7 @@ export class ExecuteWorkspaceCommandTool {
  * These tools use vscode.workspace.fs directly, so they bypass Bob's
  * single-root sandbox and never trigger "outside workspace" confirmation prompts.
  *
- * Tools registered (10):
+ * Tools registered (11):
  *   list_workspace_folders        - discover all workspace roots
  *   read_workspace_file           - read any file (replaces read_file)
  *   write_workspace_file          - write/create any file (replaces write_file)
@@ -1358,7 +1360,102 @@ export class ExecuteWorkspaceCommandTool {
  *   search_and_replace_workspace  - find/replace in file (replaces search_and_replace)
  *   apply_diff_workspace          - apply diff blocks (replaces apply_diff)
  *   execute_workspace_command     - run a command in any workspace folder (replaces execute_command)
+ *   read_workspace_video_file     - extract video frames from any workspace folder (replaces read_video_file)
  */
+
+// ─── Video workspace proxy ────────────────────────────────────────────────────
+
+export class ReadVideoFileWorkspaceTool {
+  static id = 'read_workspace_video_file';
+  groups = ['read'];
+  permission = 'read';
+
+  getId() { return ReadVideoFileWorkspaceTool.id; }
+
+  enabled(_env?: any): boolean { return isMultiRoot(); }
+
+  getDescription(_env?: any): string {
+    return (
+      'Extract frames from a video file in any workspace folder — including secondary folders ' +
+      'that are outside the primary workspace root. Use instead of read_video_file for files ' +
+      'in secondary workspace folders. Call list_workspace_folders first to get the folder name, ' +
+      'then pass it as "workspace". Supports the same vf_filter, seek, and frames_count parameters.'
+    );
+  }
+
+  getCostEffectiveDescription(): string {
+    return 'Extract video frames from any workspace folder (use instead of read_video_file for non-primary folders)';
+  }
+
+  private static readonly PARAMS = [
+    {
+      name: 'workspace',
+      type: 'string',
+      description: 'Workspace folder name as returned by list_workspace_folders (e.g. "backend").',
+      detail: 'Workspace folder name',
+      required: true,
+      usage: 'backend',
+    },
+    {
+      name: 'video_path',
+      type: 'string',
+      description: 'Path to the video file, relative to the workspace folder root.',
+      detail: 'Video file path relative to workspace folder',
+      required: true,
+      usage: 'recordings/demo.mp4',
+      renderHint: 'text',
+    },
+    ...ReadVideoFileTool.PARAMS.filter(p => p.name !== 'video_path'),
+  ] as const;
+
+  parameters = paramsToSchema(ReadVideoFileWorkspaceTool.PARAMS);
+  getParameters(_env?: any): any[] { return ReadVideoFileWorkspaceTool.PARAMS as any; }
+
+  getLabels(args: Record<string, any>) {
+    const file = args?.video_path ? ` ${args.video_path}` : '';
+    const hint = args?.vf_filter
+      ? `filter: ${args.vf_filter}`
+      : `${args?.frames_count ?? DEFAULT_VIDEO_FRAMES} frames`;
+    return {
+      displayName: `Read video${file}`,
+      running: `Extracting frames from${file} (${hint})...`,
+      success: `Extracted frames from${file}`,
+      error: `Failed to extract frames from${file}`,
+    };
+  }
+
+  async call(context: {
+    env: any;
+    parameters: { workspace: string; video_path: string; vf_filter?: string; seek?: string; frames_count?: number };
+    pushResult: (text: string) => void;
+    pushError: (text: string) => void;
+    [key: string]: any;
+  }): Promise<void> {
+    const { workspace: folderName, video_path, ...rest } = context.parameters;
+
+    const resolved = resolveInFolder(folderName, '');
+    if ('error' in resolved) {
+      context.pushError(resolved.error);
+      return;
+    }
+
+    // Call ReadVideoFileTool directly (not via getBobTool) because Bob wraps
+    // registered tools and re-injects env from t.getEnvs() at call time,
+    // discarding any env.workspace patch we pass in.
+    await new ReadVideoFileTool().call({
+      ...context,
+      env: {
+        ...context.env,
+        workspace: resolved.uri.fsPath,
+      },
+      parameters: {
+        video_path,
+        ...rest,
+      },
+    });
+  }
+}
+
 export function registerWorkspaceTools(source: any) {
   source.registerTool(new ListWorkspaceFoldersTool());
   source.registerTool(new ReadWorkspaceFileTool());
@@ -1370,7 +1467,9 @@ export function registerWorkspaceTools(source: any) {
   source.registerTool(new SearchAndReplaceWorkspaceTool());
   source.registerTool(new ApplyDiffWorkspaceTool());
   source.registerTool(new ExecuteWorkspaceCommandTool());
+  source.registerTool(new ReadVideoFileWorkspaceTool());
   registerWorkspacePromptInjection(source);
+  registerBuiltinToolRedirectGuard(source);
 }
 
 /**
@@ -1423,29 +1522,108 @@ function registerWorkspacePromptInjection(source: any) {
   });
 }
 
+/** Built-in tool name → workspace equivalent name + path parameter name. */
+const BUILTIN_REDIRECTS: Record<string, { replacement: string; pathParam: string }> = {
+  read_file:            { replacement: 'read_workspace_file',           pathParam: 'path' },
+  write_file:           { replacement: 'write_workspace_file',          pathParam: 'path' },
+  list_files:           { replacement: 'list_workspace_files',          pathParam: 'path' },
+  glob:                 { replacement: 'glob_workspace',                pathParam: 'path' },
+  grep:                 { replacement: 'grep_workspace',                pathParam: 'path' },
+  insert_content:       { replacement: 'insert_workspace_content',      pathParam: 'path' },
+  search_and_replace:   { replacement: 'search_and_replace_workspace',  pathParam: 'path' },
+  apply_diff:           { replacement: 'apply_diff_workspace',          pathParam: 'path' },
+  execute_command:      { replacement: 'execute_workspace_command',     pathParam: 'cwd' },
+  read_video_file:      { replacement: 'read_workspace_video_file',     pathParam: 'video_path' },
+};
+
+/**
+ * Intercept Bob's built-in sandboxed tools when they are called with a path
+ * that belongs to a secondary workspace folder.
+ *
+ * Without this guard, if "Allow outside workspace" is ON, Bob silently passes
+ * sandbox validation and the call either reads the wrong file (resolved against
+ * the primary root) or errors with a confusing OS-level message. If the setting
+ * is OFF, Bob returns a sandbox error which the model understands. This guard
+ * makes the behaviour consistent regardless of that setting: always return a
+ * clear, actionable redirect message.
+ *
+ * onToolWillExecute(env, toolId, args) signature confirmed from Bob internals:
+ *   - env:    task environment (getEnvs())
+ *   - toolId: string tool name (a.signature.name)
+ *   - args:   parsed parameter object (a.signature.arguments)
+ * Returning { cancel: true } aborts execution and surfaces the message to the model.
+ */
+function registerBuiltinToolRedirectGuard(source: any) {
+  source.onToolWillExecute((_env: any, toolId: string, args: Record<string, any>) => {
+    const folders = vscode.workspace.workspaceFolders ?? [];
+    return checkBuiltinToolRedirect(toolId, args, folders);
+  });
+}
+
+/**
+ * Pure detection logic for the redirect guard — separated for testability.
+ *
+ * Returns { cancel: true, message } when the call should be blocked, or
+ * undefined when it should proceed normally.
+ */
+export function checkBuiltinToolRedirect(
+  toolId: string,
+  args: Record<string, any>,
+  folders: readonly { name: string; uri: { fsPath: string } }[],
+): { cancel: true; message: string } | undefined {
+  const redirect = BUILTIN_REDIRECTS[toolId];
+  if (!redirect) { return; }
+  if (folders.length < 2) { return; }  // single-root: no secondary folders, no issue
+
+  const primaryFsPath = folders[0].uri.fsPath;
+  const rawPath: string | undefined = args?.[redirect.pathParam];
+  if (!rawPath) { return; }
+
+  // Resolve to absolute: if already absolute use as-is, else join with primary root
+  // (Bob's built-in tools resolve relative paths against the primary workspace root)
+  const absPath = path.isAbsolute(rawPath)
+    ? rawPath
+    : path.join(primaryFsPath, rawPath);
+
+  // Check if absPath sits inside a secondary folder
+  const secondaryFolder = folders.slice(1).find(f => {
+    const fsPath = f.uri.fsPath;
+    return absPath === fsPath || absPath.startsWith(fsPath + path.sep);
+  });
+
+  if (!secondaryFolder) { return; }
+
+  return {
+    cancel: true,
+    message: (
+      `ERROR: \`${toolId}\` is sandboxed to the primary workspace folder ` +
+      `("${folders[0].name}" at ${primaryFsPath}).\n` +
+      `The path "${rawPath}" is inside the secondary folder "${secondaryFolder.name}".\n` +
+      `Use \`${redirect.replacement}\` with workspace="${secondaryFolder.name}" instead, ` +
+      `and pass the path relative to that folder's root.`
+    ),
+  };
+}
+
 function buildInjection(folders: readonly vscode.WorkspaceFolder[]): string {
-  const lines = folders.map(f => `  - name="${f.name}"  fsPath="${f.uri.fsPath}"`);
+  const folderLines = folders.map(f => `  - name="${f.name}"  fsPath="${f.uri.fsPath}"`);
+  const builtinNames = Object.keys(BUILTIN_REDIRECTS).join(', ');
+  const maxLen = Math.max(...Object.values(BUILTIN_REDIRECTS).map(r => r.replacement.length));
+  const toolLines = Object.entries(BUILTIN_REDIRECTS).map(([builtin, { replacement }]) =>
+    `  ${replacement.padEnd(maxLen)}  - replaces ${builtin}`
+  );
   return [
     '',
     '<multi_root_workspace>',
     `This is a multi-root workspace with ${folders.length} root folders:`,
-    ...lines,
+    ...folderLines,
     '',
     `The PRIMARY folder (used by built-in tools) is: ${folders[0].uri.fsPath}`,
-    'IMPORTANT: Built-in tools (read_file, write_file, list_files, glob, grep,',
-    'insert_content, search_and_replace, execute_command) are SANDBOXED to the primary',
-    'folder and will be BLOCKED for all other folders.', 
+    `IMPORTANT: Built-in tools (${builtinNames}) are SANDBOXED to the primary`,
+    'folder and will be BLOCKED for all other folders.',
     '',
     'You MUST use the workspace-specific tools for any secondary folder:',
-    '  read_workspace_file           - replaces read_file',
-    '  write_workspace_file          - replaces write_file',
-    '  list_workspace_files          - replaces list_files',
-    '  glob_workspace                - replaces glob',
-    '  grep_workspace                - replaces grep',
-    '  insert_workspace_content      - replaces insert_content',
-    '  search_and_replace_workspace  - replaces search_and_replace',
-    '  apply_diff_workspace          - replaces apply_diff',
-    '  execute_workspace_command     - replaces execute_command',
+    ...toolLines,
     '',
     'WORKFLOW: call list_workspace_folders → copy the folder "name" → pass it as the',
     '"workspace" parameter to the tool above.',
