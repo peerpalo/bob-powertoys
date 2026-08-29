@@ -2,10 +2,16 @@ import * as vscode from 'vscode';
 import { paramsToSchema } from '../utils.js';
 
 const terminalOutputLog = new Map<vscode.Terminal, string[]>();
-const MAX_TERMINAL_OUTPUT_CHARS = 1000;
+const MAX_TERMINAL_OUTPUT_LINES = 1000;
+// Buffer is intentionally larger than the output window so startLine pagination
+// can reach earlier history beyond what a single call returns.
+const MAX_TERMINAL_BUFFER_LINES = 5000;
 
 function stripAnsi(str: string): string {
-  return str.replace(/\x1B\[[0-9;]*[mGKHFJK]/g, '');
+  // OSC sequences (\x1B]...ST or BEL), then all other ESC sequences
+  return str
+    .replace(/\x1B\][^\x1B\x07]*(?:\x07|\x1B\\)/g, '')
+    .replace(/\x1B[@-Z\\-_]|\x1B\[[0-9;?]*[ -/]*[@-~]/g, '');
 }
 
 /**
@@ -19,14 +25,27 @@ export function registerTerminalCapture(context: vscode.ExtensionContext) {
         terminalOutputLog.set(terminal, []);
       }
 
-      (async () => {
+      // Each shell execution appends to the same terminal's log. Concurrent
+      // executions (e.g. rapid Ctrl+C + new command) are accepted without
+      // synchronisation — VS Code serialises shell integration in practice.
+      void (async () => {
         try {
           for await (const chunk of event.execution.read()) {
             const log = terminalOutputLog.get(terminal);
             if (log) {
-              log.push(stripAnsi(chunk));
-              if (log.length > 1000) {
-                log.shift();
+              // Chunks are arbitrary PTY blobs — split into actual lines so that
+              // startLine, lines, totalLines, and outputLines are line-accurate.
+              // split('\n') on "a\nb\n" gives ["a","b",""] — filter the trailing
+              // empty fragment so we don't store a spurious blank line.
+              const stripped = stripAnsi(chunk);
+              const parts = stripped.split('\n');
+              if (parts[parts.length - 1] === '') parts.pop();
+              for (const part of parts) {
+                log.push(part + '\n');
+              }
+              // Drop oldest 10% in a batch to amortise the cost of overflow.
+              if (log.length > MAX_TERMINAL_BUFFER_LINES) {
+                log.splice(0, Math.ceil(MAX_TERMINAL_BUFFER_LINES * 0.1));
               }
             }
           }
@@ -34,15 +53,6 @@ export function registerTerminalCapture(context: vscode.ExtensionContext) {
           // Ignore errors from shell execution stream
         }
       })();
-    })
-  );
-
-  context.subscriptions.push(
-    vscode.window.onDidEndTerminalShellExecution(async event => {
-      const terminal = event.terminal;
-      if (!terminalOutputLog.has(terminal)) {
-        terminalOutputLog.set(terminal, []);
-      }
     })
   );
 
@@ -119,7 +129,7 @@ export class GetTerminalOutputTool {
   getId() { return GetTerminalOutputTool.id; }
  
   getDescription(_env?: any): string {
-    return `Get captured output from a terminal. Output is captured automatically via shell integration. Returns the most recent output up to the specified character limit (default and max: ${MAX_TERMINAL_OUTPUT_CHARS}).`;
+    return `Get captured output from a terminal. Output is captured automatically via shell integration. Use \`lines\` to return the last N lines (default: 50, max: ${MAX_TERMINAL_OUTPUT_LINES}), or \`startLine\` to paginate forward — call \`list_terminals\` first to get \`outputLines\` for the full buffer size. If output was truncated, the response includes \`truncated: true\`.`;
   }
  
   getCostEffectiveDescription(): string {
@@ -129,7 +139,8 @@ export class GetTerminalOutputTool {
   // Shared param definition
   private static readonly PARAMS = [
     { name: 'terminalName', type: 'string', detail: 'Name of the terminal to get output from (defaults to active terminal)', description: 'Name of the terminal to get output from (defaults to active terminal)', required: false, usage: 'bash' },
-    { name: 'maxChars', type: 'number', detail: `Maximum characters to return (default and max: ${MAX_TERMINAL_OUTPUT_CHARS})`, description: `Maximum characters to return (default and max: ${MAX_TERMINAL_OUTPUT_CHARS})`, required: false, usage: '1000' },
+    { name: 'lines', type: 'number', detail: `Max number of lines to return (default: 50, max: ${MAX_TERMINAL_OUTPUT_LINES}). Returns the last N lines. Takes priority over startLine when both are provided.`, description: `Max number of lines to return (default: 50, max: ${MAX_TERMINAL_OUTPUT_LINES}). Returns the last N lines. Takes priority over startLine when both are provided.`, required: false, usage: '50' },
+    { name: 'startLine', type: 'number', detail: '0-based line index to start reading from. Use list_terminals to get total outputLines. Ignored when lines is also provided.', description: '0-based line index to start reading from. Ignored when lines is also provided.', required: false, usage: '0' },
   ];
 
   // Property - read by toolToOpenAi(e).parameters
@@ -152,12 +163,11 @@ export class GetTerminalOutputTool {
  
   async call(context: {
     env: any;
-    parameters: { terminalName?: string; maxChars?: number };
+    parameters: { terminalName?: string; lines?: number; startLine?: number };
     pushResult: (text: string) => void;
     pushError: (text: string) => void;
   }): Promise<void> {
-    const { terminalName, maxChars = MAX_TERMINAL_OUTPUT_CHARS } = context.parameters;
-    const requestedChars = Math.min(maxChars ?? MAX_TERMINAL_OUTPUT_CHARS, MAX_TERMINAL_OUTPUT_CHARS);
+    const { terminalName, lines, startLine } = context.parameters;
  
     const terminal = terminalName
       ? vscode.window.terminals.find(t => t.name === terminalName)
@@ -175,21 +185,38 @@ export class GetTerminalOutputTool {
     if (output.length === 0) {
       context.pushResult(JSON.stringify({
         terminalName: terminal.name,
+        totalLines: 0,
         output: '',
         message: 'No output captured. Output is only captured after extension activation and requires shell integration.',
       }, null, 2));
       return;
     }
- 
-    const fullOutput = output.join('');
-    const recentOutput = fullOutput.slice(-requestedChars);
- 
+
+    // Determine which slice of lines to use, capped at MAX_TERMINAL_OUTPUT_LINES
+    let slice: string[];
+    let isTruncated = false;
+    if (lines !== undefined) {
+      // tail-N mode: last N lines, capped. Takes priority over startLine.
+      const n = Math.min(lines, MAX_TERMINAL_OUTPUT_LINES);
+      slice = output.slice(Math.max(0, output.length - n));
+      isTruncated = lines > MAX_TERMINAL_OUTPUT_LINES;
+    } else if (startLine !== undefined) {
+      // paginate-from mode: start at offset, take up to MAX_TERMINAL_OUTPUT_LINES
+      const from = Math.max(0, startLine);
+      const n = MAX_TERMINAL_OUTPUT_LINES;
+      slice = output.slice(from, from + n);
+      isTruncated = (output.length - from) > n;
+    } else {
+      // default: last 50 lines
+      slice = output.slice(Math.max(0, output.length - 50));
+    }
+
     context.pushResult(JSON.stringify({
       terminalName: terminal.name,
-      totalChars: fullOutput.length,
-      returnedChars: recentOutput.length,
-      maxChars: MAX_TERMINAL_OUTPUT_CHARS,
-      output: recentOutput,
+      totalLines: output.length,
+      returnedLines: slice.length,
+      ...(isTruncated && { truncated: true }),
+      output: slice.join(''),
     }, null, 2));
   }
 }
@@ -202,7 +229,7 @@ export class SearchTerminalOutputTool {
   getId() { return SearchTerminalOutputTool.id; }
  
   getDescription(_env?: any): string {
-    return 'Search terminal output using a regular expression pattern. Returns matching lines with context.';
+    return `Search terminal output using a regular expression pattern. Returns matching lines with their content (max: ${MAX_TERMINAL_OUTPUT_LINES} matching lines). If results were truncated, the response includes \`truncated: true\`.`;
   }
  
   getCostEffectiveDescription(): string {
@@ -213,7 +240,6 @@ export class SearchTerminalOutputTool {
   private static readonly PARAMS = [
     { name: 'query', type: 'string', detail: 'Regular expression pattern to search for in terminal output', description: 'Regular expression pattern to search for in terminal output', required: true, usage: 'error|warning' },
     { name: 'terminalName', type: 'string', detail: 'Name of the terminal to search (defaults to active terminal)', description: 'Name of the terminal to search (defaults to active terminal)', required: false, usage: 'bash' },
-    { name: 'maxChars', type: 'number', detail: `Maximum characters to return in matches (default and max: ${MAX_TERMINAL_OUTPUT_CHARS})`, description: `Maximum characters to return in matches (default and max: ${MAX_TERMINAL_OUTPUT_CHARS})`, required: false, usage: '1000' },
   ];
 
   // Property - read by toolToOpenAi(e).parameters
@@ -235,12 +261,11 @@ export class SearchTerminalOutputTool {
  
   async call(context: {
     env: any;
-    parameters: { query: string; terminalName?: string; maxChars?: number };
+    parameters: { query: string; terminalName?: string };
     pushResult: (text: string) => void;
     pushError: (text: string) => void;
   }): Promise<void> {
-    const { query, terminalName, maxChars = MAX_TERMINAL_OUTPUT_CHARS } = context.parameters;
-    const requestedChars = Math.min(maxChars ?? MAX_TERMINAL_OUTPUT_CHARS, MAX_TERMINAL_OUTPUT_CHARS);
+    const { query, terminalName } = context.parameters;
  
     const terminal = terminalName
       ? vscode.window.terminals.find(t => t.name === terminalName)
@@ -265,38 +290,28 @@ export class SearchTerminalOutputTool {
       return;
     }
  
-    try {
-      const regex = new RegExp(query, 'i');
-      const matches: string[] = [];
-      let totalChars = 0;
- 
-      for (let i = 0; i < output.length; i++) {
-        if (regex.test(output[i])) {
-          const line = output[i];
-          if (totalChars + line.length > requestedChars) break;
-          matches.push(line);
-          totalChars += line.length;
+    const regex = new RegExp(query, 'i');
+    const matches: string[] = [];
+    let truncated = false;
+
+    for (let i = 0; i < output.length; i++) {
+      if (regex.test(output[i])) {
+        if (matches.length >= MAX_TERMINAL_OUTPUT_LINES) {
+          truncated = true;
+          break;
         }
+        matches.push(output[i]);
       }
- 
-      const matchedOutput = matches.join('');
- 
-      context.pushResult(JSON.stringify({
-        terminalName: terminal.name,
-        query,
-        totalLines: output.length,
-        matchedLines: matches.length,
-        matchedChars: matchedOutput.length,
-        maxChars: MAX_TERMINAL_OUTPUT_CHARS,
-        matchedOutput,
-      }, null, 2));
-    } catch (error) {
-      context.pushError(JSON.stringify({
-        error: 'Invalid regex pattern',
-        query,
-        message: error instanceof Error ? error.message : String(error),
-      }, null, 2));
     }
+
+    context.pushResult(JSON.stringify({
+      terminalName: terminal.name,
+      query,
+      totalLines: output.length,
+      matchedLines: matches.length,
+      ...(truncated && { truncated: true }),
+      matchedOutput: matches.join(''),
+    }, null, 2));
   }
  
   // Optional: reject an invalid regex before call() runs
