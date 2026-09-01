@@ -152,6 +152,7 @@ If Bob is not yet logged in when the extension activates, `registerTaskManager` 
 ```typescript
 // Phase 1 — always works
 const source = bobExports.registerSource(EXTENSION_ID, EXTENSION_DISPLAY_NAME);
+source.firstParty = true;
 registerBreakpointTools(source);
 // ... all other registerXxxTools calls ...
 
@@ -176,6 +177,7 @@ try {
 ```
 
 Key points:
+- **`source.firstParty = true`** — the public `registerSource` wrapper drops the third argument (`firstParty`), so it always defaults to `false` unless set directly. Without `firstParty=true`, any Bob build that calls `setDisabledSources()` will exclude this source: `sourceIsEnabled()` returns false and all tools disappear.
 - `source.onEntitlementChange` fires when Bob logs in and re-evaluates entitlements — confirmed by testing. It fires even though our source is not a paid addon; Bob's `AddonManager.triggerEntitlementChange()` iterates all enabled sources in the registry.
 - `registerSource` and `registerTool` must happen **before** `completeRegisterPowerToys` so that our source is already in the registry (and thus receives `onEntitlementChange`) when Bob later logs in.
 - The `fired` guard makes the listener one-shot, preventing duplicate setup if the event fires more than once.
