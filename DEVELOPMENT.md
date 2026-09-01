@@ -75,7 +75,7 @@ bob-powertoys/
 
 IBM Bob is a fork of VS Code. The Bob application ships a built-in extension with the VS Code extension ID **`IBM.bob-code`** - this is the extension that PowerToys activates against. It is always present in any Bob installation; there is nothing to install separately.
 
-PowerToys declares `"extensionDependencies": ["IBM.bob-code"]` in `package.json`, which guarantees Bob is fully activated before our `activate()` runs, and gives us access to `bobExtension.exports` via:
+PowerToys does **not** declare `extensionDependencies` — `IBM.bob-code` is Bob-internal and not published on any marketplace, so declaring it as a dependency would break VSIX publishing. Instead, `activate()` calls `bobExtension.activate()` explicitly to ensure Bob is ready before accessing its exports:
 
 ```typescript
 const bobExtension = vscode.extensions.getExtension('IBM.bob-code');

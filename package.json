@@ -22,9 +22,6 @@
     "Debuggers",
     "Other"
   ],
-  "extensionDependencies": [
-    "IBM.bob-code"
-  ],
   "activationEvents": [
     "onDebug",
     "onStartupFinished"
