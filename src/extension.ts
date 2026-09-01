@@ -108,6 +108,10 @@ async function registerPowerToys(context: vscode.ExtensionContext, bobExports: a
     }
 
     const source = bobExports.registerSource(EXTENSION_ID, EXTENSION_DISPLAY_NAME);
+    // The public registerSource wrapper drops the 3rd arg (firstParty) — set directly.
+    // Without firstParty=true, any Bob build that calls setDisabledSources() will put
+    // this source in _disabledSources: sourceIsEnabled() returns false, no tools appear.
+    source.firstParty = true;
 
     if (!source?.registerTool) {
       logger.error('Source registerTool method not found');
