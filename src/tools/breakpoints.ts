@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
-import { paramsToSchema } from '../utils.js';
+import { paramsToSchema, isAreaEnabled } from '../utils.js';
 
 // ─── Bob-set Breakpoint Tracking ─────────────────────────────────────────────
 
@@ -36,6 +36,7 @@ export class SetBreakpointsTool {
   permission = 'edit';
 
   getId() { return SetBreakpointsTool.id; }
+  enabled(_env?: any): boolean { return isAreaEnabled('Debug'); }
 
   getDescription(_env?: any): string {
     return 'Set one or more breakpoints in source files. Supports conditional breakpoints. Automatically resolves relative paths against workspace folders.';
@@ -151,6 +152,7 @@ export class RemoveBreakpointsTool {
   permission = 'edit';
 
   getId() { return RemoveBreakpointsTool.id; }
+  enabled(_env?: any): boolean { return isAreaEnabled('Debug'); }
 
   getDescription(_env?: any): string {
     return 'Remove one or more breakpoints from source files by file path and line number.';
@@ -234,6 +236,7 @@ export class ListBreakpointsTool {
   permission = 'read';
 
   getId() { return ListBreakpointsTool.id; }
+  enabled(_env?: any): boolean { return isAreaEnabled('Debug'); }
 
   getDescription(_env?: any): string {
     return 'List all currently set breakpoints in the workspace, including their file locations, line numbers, conditions, and enabled status.';

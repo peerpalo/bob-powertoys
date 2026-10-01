@@ -9,7 +9,7 @@ import { registerWorkspaceTools, registerWebviewToolNamePatch } from './tools/wo
 import { registerBobExtensionsTools } from './tools/bobExtensions.js';
 import { registerVideoTools } from './tools/videos.js';
 import { registerDebugAdapterTracker } from './debugAdapter.js';
-import { registerTaskManager, EXTENSION_ID, EXTENSION_DISPLAY_NAME, logger } from './utils.js';
+import { registerTaskManager, EXTENSION_ID, EXTENSION_DISPLAY_NAME, logger, isAreaEnabled } from './utils.js';
 import { registerTaskCommands, registerTaskPersistence, restoreTasks } from './taskManager.js';
 
 const BOB_EXTENSION_ID = 'IBM.bob-code';
@@ -17,6 +17,7 @@ const SHOW_STATUS_COMMAND = `${EXTENSION_ID}.showStatus`;
 const RELOAD_COMMAND = `${EXTENSION_ID}.reload`;
 
 let statusBarItem: vscode.StatusBarItem;
+let registeredTools: any[] = [];
 
 /**
  * Derives a migration flag key from a version string, e.g. "0.6.9" → "bob-powertoys.migration.069.done".
@@ -32,7 +33,7 @@ function migrationKey(version: string): string {
  * runs again, regardless of what the current package version is.
  */
 async function migrateGlobalState(context: vscode.ExtensionContext): Promise<void> {
-  const WIPE_BEFORE_VERSION = '0.7.0';
+  const WIPE_BEFORE_VERSION = '0.8.3';
   const flagKey = migrationKey(WIPE_BEFORE_VERSION);
   if (context.globalState.get<boolean>(flagKey)) { return; }
 
@@ -97,6 +98,17 @@ export function activate(context: vscode.ExtensionContext) {
 
   // Register task window commands
   registerTaskCommands(context);
+
+  // Log when a tool area setting changes.
+  context.subscriptions.push(
+    vscode.workspace.onDidChangeConfiguration(e => {
+      for (const area of ['Debug', 'Terminal', 'Workspace', 'Video', 'Extensions']) {
+        if (e.affectsConfiguration(`tools.enable${area}`)) {
+          logger.log(`${area} tools ${isAreaEnabled(area) ? 'enabled' : 'disabled'}`);
+        }
+      }
+    })
+  );
 }
 
 async function registerPowerToys(context: vscode.ExtensionContext, bobExports: any) {
@@ -119,6 +131,12 @@ async function registerPowerToys(context: vscode.ExtensionContext, bobExports: a
       return;
     }
 
+    // Intercept registerTool to collect every tool instance as it is registered.
+    // showStatus() uses the list to count active tools via enabled() at display time.
+    registeredTools = [];
+    const bobRegisterTool = source.registerTool.bind(source);
+    source.registerTool = (tool: any) => { registeredTools.push(tool); bobRegisterTool(tool); };
+
     registerBreakpointTools(source);           // 3 tools
     registerDebugControlTools(source);         // 5 tools
     registerDebugConsoleTools(source);         // 6 tools
@@ -128,7 +146,7 @@ async function registerPowerToys(context: vscode.ExtensionContext, bobExports: a
     registerWorkspaceTools(source);            // 11 tools (10 + read_workspace_video_file)
     registerBobExtensionsTools(source);        // 1 tool
     registerVideoTools(source);                // 1 tool
-    logger.log('Successfully registered 36 tools with Bob');
+    logger.log(`Successfully registered ${registeredTools.length} tools with Bob`);
 
     await completeRegisterPowerToys(context, bobExports, source);
   } catch (error) {
@@ -196,18 +214,24 @@ function showStatusBarError() {
 function showStatus() {
   const activeSession = vscode.debug.activeDebugSession;
   const sessionName = activeSession ? activeSession.name : 'None';
+  // Count tools whose enabled() returns true at this moment.
+  // enabled() already encodes all conditions (area setting + isMultiRoot for workspace tools).
+  const toolCount = registeredTools.filter(t => t.enabled?.() !== false).length;
+
+  const notificationsState = isAreaEnabled('Debug') ? 'Enabled' : 'Disabled (debug area off)';
 
   const status = [
     `${EXTENSION_DISPLAY_NAME}:`,
     '',
-    '- Total Tools Registered: 36',
-    '- Automatic Breakpoint Notifications: Enabled',
+    `- Tools Active: ${toolCount}`,
+    `- Automatic Breakpoint Notifications: ${notificationsState}`,
     '- Active Debug Session: ' + sessionName,
     '- Breakpoints: ' + vscode.debug.breakpoints.length,
     '- Open Terminals: ' + vscode.window.terminals.length,
     '',
-    'All tools are now available to Bob.',
-    'Bob will be automatically notified when breakpoints are hit.'
+    'Disabled areas: ' + (['Debug', 'Terminal', 'Workspace', 'Video', 'Extensions']
+      .filter(a => !isAreaEnabled(a))
+      .join(', ') || 'none'),
   ].join('\n');
 
   vscode.window.showInformationMessage(status, { modal: true });

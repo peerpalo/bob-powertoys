@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { paramsToSchema } from '../utils.js';
+import { paramsToSchema, isAreaEnabled } from '../utils.js';
 
 // ─── Tool classes ────────────────────────────────────────────────────────────
 
@@ -9,6 +9,7 @@ export class StepOverTool {
   permission = 'edit';
 
   getId() { return StepOverTool.id; }
+  enabled(_env?: any): boolean { return isAreaEnabled('Debug'); }
 
   getDescription(_env?: any): string {
     return 'Step over the current line in the active debug session. Executes the current line and moves to the next line, stepping over function calls.';
@@ -65,6 +66,7 @@ export class StepIntoTool {
   permission = 'edit';
 
   getId() { return StepIntoTool.id; }
+  enabled(_env?: any): boolean { return isAreaEnabled('Debug'); }
 
   getDescription(_env?: any): string {
     return 'Step into the function call at the current line in the active debug session. Enters the function to debug its internals.';
@@ -121,6 +123,7 @@ export class StepOutTool {
   permission = 'edit';
 
   getId() { return StepOutTool.id; }
+  enabled(_env?: any): boolean { return isAreaEnabled('Debug'); }
 
   getDescription(_env?: any): string {
     return 'Step out of the current function in the active debug session. Continues execution until the current function returns.';
@@ -177,6 +180,7 @@ export class ContinueTool {
   permission = 'edit';
 
   getId() { return ContinueTool.id; }
+  enabled(_env?: any): boolean { return isAreaEnabled('Debug'); }
 
   getDescription(_env?: any): string {
     return 'Continue execution in the active debug session. Resumes program execution until the next breakpoint or program termination.';
@@ -233,6 +237,7 @@ export class PauseTool {
   permission = 'edit';
 
   getId() { return PauseTool.id; }
+  enabled(_env?: any): boolean { return isAreaEnabled('Debug'); }
 
   getDescription(_env?: any): string {
     return 'Pause execution in the active debug session. Interrupts the running program to inspect its current state.';

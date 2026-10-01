@@ -1,5 +1,6 @@
-import { describe, it, expect } from 'vitest';
-import { normaliseWorkspacePath, paramsToSchema } from '../src/utils.js';
+import { describe, it, expect, beforeEach } from 'vitest';
+import { normaliseWorkspacePath, paramsToSchema, isAreaEnabled } from '../src/utils.js';
+import { mockConfig } from './__mocks__/vscode.js';
 
 describe('normaliseWorkspacePath', () => {
 
@@ -202,6 +203,43 @@ describe('paramsToSchema', () => {
       expect(s.properties.command.usage).toBe('command');
       expect(s.properties.cwd).not.toHaveProperty('usage');
     });
+  });
+
+});
+
+describe('isAreaEnabled', () => {
+
+  beforeEach(() => {
+    // Reset config store before each test so cases are independent.
+    for (const key of Object.keys(mockConfig)) { delete mockConfig[key]; }
+  });
+
+  it('returns true by default when no setting is configured', () => {
+    expect(isAreaEnabled('Debug')).toBe(true);
+  });
+
+  it('returns false when the setting is explicitly false', () => {
+    mockConfig['bob-powertoys.tools.debug.enabled'] = false;
+    expect(isAreaEnabled('Debug')).toBe(false);
+  });
+
+  it('returns true when the setting is explicitly true', () => {
+    mockConfig['bob-powertoys.tools.debug.enabled'] = true;
+    expect(isAreaEnabled('Debug')).toBe(true);
+  });
+
+  it('is independent per area — disabling one does not affect another', () => {
+    mockConfig['bob-powertoys.tools.debug.enabled'] = false;
+    expect(isAreaEnabled('Terminal')).toBe(true);
+    expect(isAreaEnabled('Workspace')).toBe(true);
+  });
+
+  it('handles all area names', () => {
+    for (const area of ['Debug', 'Terminal', 'Workspace', 'Video', 'Extensions']) {
+      mockConfig[`bob-powertoys.tools.${area.toLowerCase()}.enabled`] = false;
+      expect(isAreaEnabled(area)).toBe(false);
+      delete mockConfig[`bob-powertoys.tools.${area.toLowerCase()}.enabled`];
+    }
   });
 
 });

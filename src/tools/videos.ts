@@ -2,7 +2,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
-import { paramsToSchema } from '../utils.js';
+import { paramsToSchema, isAreaEnabled } from '../utils.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -25,6 +25,7 @@ export class ReadVideoFileTool {
   permission = 'read';
 
   getId(): string { return ReadVideoFileTool.id; }
+  enabled(_env?: any): boolean { return isAreaEnabled('Video'); }
 
   getDescription(_env?: any): string {
     return (

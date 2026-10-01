@@ -15,8 +15,18 @@ export const logger = {
 import * as path from 'path';
 import { existsSync } from 'fs';
 import { createPatch } from 'diff';
+import * as vscode from 'vscode';
 
 export { createPatch };
+
+/**
+ * Returns true when the given tool area is enabled in settings.
+ * Area names match the tool group key, e.g.:
+ *   isAreaEnabled('Debug')  →  bob-powertoys.tools.debug.enabled  (as declared in package.json)
+ */
+export function isAreaEnabled(area: string): boolean {
+  return vscode.workspace.getConfiguration('bob-powertoys').get<boolean>(`tools.${area.toLowerCase()}.enabled`, true);
+}
 
 // Cached taskManager instance - populated once by initTaskManager(), reused everywhere.
 let _cachedTaskManager: any = null;

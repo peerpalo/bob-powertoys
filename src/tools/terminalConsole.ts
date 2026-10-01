@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { paramsToSchema } from '../utils.js';
+import { paramsToSchema, isAreaEnabled } from '../utils.js';
 
 const terminalOutputLog = new Map<vscode.Terminal, string[]>();
 const MAX_TERMINAL_OUTPUT_LINES = 1000;
@@ -71,6 +71,7 @@ export class ListTerminalsTool {
   permission = 'read';
  
   getId() { return ListTerminalsTool.id; }
+  enabled(_env?: any): boolean { return isAreaEnabled('Terminal'); }
  
   getDescription(_env?: any): string {
     return 'List all open terminals with their names, active status, exit status, and output capture information.';
@@ -127,6 +128,7 @@ export class GetTerminalOutputTool {
   permission = 'read';
  
   getId() { return GetTerminalOutputTool.id; }
+  enabled(_env?: any): boolean { return isAreaEnabled('Terminal'); }
  
   getDescription(_env?: any): string {
     return `Get captured output from a terminal. Output is captured automatically via shell integration. Use \`lines\` to return the last N lines (default: 50, max: ${MAX_TERMINAL_OUTPUT_LINES}), or \`startLine\` to paginate forward — call \`list_terminals\` first to get \`outputLines\` for the full buffer size. If output was truncated, the response includes \`truncated: true\`.`;
@@ -227,6 +229,7 @@ export class SearchTerminalOutputTool {
   permission = 'read';
  
   getId() { return SearchTerminalOutputTool.id; }
+  enabled(_env?: any): boolean { return isAreaEnabled('Terminal'); }
  
   getDescription(_env?: any): string {
     return `Search terminal output using a regular expression pattern. Returns matching lines with their content (max: ${MAX_TERMINAL_OUTPUT_LINES} matching lines). If results were truncated, the response includes \`truncated: true\`.`;
@@ -331,6 +334,7 @@ export class FocusTerminalTool {
   permission = 'edit';
  
   getId() { return FocusTerminalTool.id; }
+  enabled(_env?: any): boolean { return isAreaEnabled('Terminal'); }
  
   getDescription(_env?: any): string {
     return 'Bring a terminal into focus in the VS Code UI. Makes the terminal visible and active.';

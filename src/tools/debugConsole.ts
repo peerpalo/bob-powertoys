@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { resolveFrameId, paramsToSchema } from '../utils.js';
+import { resolveFrameId, paramsToSchema, isAreaEnabled } from '../utils.js';
 import { getCurrentStoppedState, getRecentDebugOutput } from '../debugAdapter.js';
 
 /**
@@ -33,6 +33,7 @@ export class EvaluateExpressionTool {
   permission = 'read';
 
   getId() { return EvaluateExpressionTool.id; }
+  enabled(_env?: any): boolean { return isAreaEnabled('Debug'); }
 
   getDescription(_env?: any): string {
     return 'Evaluate an expression in the current debug session context. Requires the debugger to be paused at a breakpoint. Automatically expands object references.';
@@ -123,6 +124,7 @@ export class GetVariablesTool {
   permission = 'read';
 
   getId() { return GetVariablesTool.id; }
+  enabled(_env?: any): boolean { return isAreaEnabled('Debug'); }
 
   getDescription(_env?: any): string {
     return 'Retrieve variables for a given variables reference ID obtained from a previous evaluate_expression or get_scopes call. Use this to drill into nested objects.';
@@ -185,6 +187,7 @@ export class GetStackTraceTool {
   permission = 'read';
 
   getId() { return GetStackTraceTool.id; }
+  enabled(_env?: any): boolean { return isAreaEnabled('Debug'); }
 
   getDescription(_env?: any): string {
     return 'Retrieve the call stack for the current debug session. Shows all stack frames with file locations and line numbers.';
@@ -270,6 +273,7 @@ export class GetScopesTool {
   permission = 'read';
 
   getId() { return GetScopesTool.id; }
+  enabled(_env?: any): boolean { return isAreaEnabled('Debug'); }
 
   getDescription(_env?: any): string {
     return 'Retrieve the variable scopes for a given stack frame. Returns scope names and their variablesReference IDs which can be passed to get_variables.';
@@ -339,6 +343,7 @@ export class SetVariableTool {
   permission = 'edit';
 
   getId() { return SetVariableTool.id; }
+  enabled(_env?: any): boolean { return isAreaEnabled('Debug'); }
 
   getDescription(_env?: any): string {
     return 'Set the value of a variable in the active debug session. Requires the debugger to be paused.';
@@ -408,6 +413,7 @@ export class GetDebugOutputTool {
   permission = 'read';
 
   getId() { return GetDebugOutputTool.id; }
+  enabled(_env?: any): boolean { return isAreaEnabled('Debug'); }
 
   getDescription(_env?: any): string {
     return 'Retrieve captured output from the debug console. Output is captured automatically during debug sessions via the Debug Adapter Protocol.';
