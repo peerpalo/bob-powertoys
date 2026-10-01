@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { paramsToSchema } from '../utils.js';
+import { paramsToSchema, isAreaEnabled } from '../utils.js';
 
 // ─── Tool classes ────────────────────────────────────────────────────────────
 
@@ -9,6 +9,7 @@ export class ListExtensionsTool {
   permission = 'read';
 
   getId() { return ListExtensionsTool.id; }
+  enabled(_env?: any): boolean { return isAreaEnabled('Extensions'); }
 
   getDescription(_env?: any): string {
     return [

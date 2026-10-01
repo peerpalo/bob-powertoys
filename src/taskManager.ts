@@ -117,7 +117,6 @@ function wrapWebviewSendMessage(context: vscode.ExtensionContext, chatManager: a
     try {
       if (msg?.type === 'setCurrentTasks') {
         const hasTasks = (msg.tasks?.length ?? 0) > 0;
-        logger.log('setCurrentTasks intercepted (isPanel=%s), tasks:', isPanel, msg.tasks?.length ?? 0);
         if (!isPanel || hasTasks) {
           saveTasks(context, chatManager, isPanel);
         }
@@ -261,9 +260,11 @@ async function saveTasks(context: vscode.ExtensionContext, chatManager: any, isP
       ? topLevelChatManager.getTaskId?.()
       : undefined;
 
-    logger.log(`Saving last sidebar task: ${lastSidebarTaskId}`);
-    vscode.commands.executeCommand('setContext', HAS_LAST_SIDEBAR_TASK_CTX, !!lastSidebarTaskId);
-    await context.globalState.update(sidebarKey(), lastSidebarTaskId);
+    if (lastSidebarTaskId !== context.globalState.get<string>(sidebarKey())) {
+      logger.log(`Saving last sidebar task: ${lastSidebarTaskId}`);
+      vscode.commands.executeCommand('setContext', HAS_LAST_SIDEBAR_TASK_CTX, !!lastSidebarTaskId);
+      await context.globalState.update(sidebarKey(), lastSidebarTaskId);
+    }
   } else {
     // ── Tab ──────────────────────────────────────────────────────────────────
     const taskId = chatManager?.getTaskId?.();

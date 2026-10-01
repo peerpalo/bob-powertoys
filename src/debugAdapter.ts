@@ -67,8 +67,8 @@ async function notifyBobOfBreakpointHit(
 ): Promise<boolean> {
   try {
     // Check configuration setting
-    const config = vscode.workspace.getConfiguration();
-    const notificationMode = config.get<string>('breakpointNotifications', 'bobOnly');
+    const config = vscode.workspace.getConfiguration('bob-powertoys');
+    const notificationMode = config.get<string>('tools.debug.breakpointNotifications', 'bobOnly');
     if (notificationMode === 'disabled') {
       return false;
     }

@@ -12,7 +12,7 @@
 
 import * as vscode from 'vscode';
 import * as path from 'path';
-import { getTaskManager, findTaskChatManager, getBobTool, normaliseWorkspacePath, paramsToSchema, createPatch, absolutiseToolContent, resolveOpenFilePath } from '../utils.js';
+import { getTaskManager, findTaskChatManager, getBobTool, normaliseWorkspacePath, paramsToSchema, createPatch, absolutiseToolContent, resolveOpenFilePath, isAreaEnabled } from '../utils.js';
 import { ReadVideoFileTool, DEFAULT_VIDEO_FRAMES } from './videos.js';
 
 /** Return all workspace folder roots as { name, uri, fsPath, index } objects. */
@@ -69,9 +69,9 @@ export class ListWorkspaceFoldersTool {
 
   getId() { return ListWorkspaceFoldersTool.id; }
 
-  /** Only expose this tool when there are multiple workspace roots. */
+  /** Only expose this tool when there are multiple workspace roots and the workspace area is enabled. */
   enabled(_env?: any): boolean {
-    return isMultiRoot();
+    return isMultiRoot() && isAreaEnabled('Workspace');
   }
 
   getDescription(_env?: any): string {
@@ -141,9 +141,9 @@ export class ReadWorkspaceFileTool {
 
   getId() { return ReadWorkspaceFileTool.id; }
 
-  /** Only expose this tool when there are multiple workspace roots. */
+  /** Only expose this tool when there are multiple workspace roots and the workspace area is enabled. */
   enabled(_env?: any): boolean {
-    return isMultiRoot();
+    return isMultiRoot() && isAreaEnabled('Workspace');
   }
 
   getDescription(_env?: any): string {
@@ -256,9 +256,9 @@ export class ListWorkspaceFilesTool {
 
   getId() { return ListWorkspaceFilesTool.id; }
 
-  /** Only expose this tool when there are multiple workspace roots. */
+  /** Only expose this tool when there are multiple workspace roots and the workspace area is enabled. */
   enabled(_env?: any): boolean {
-    return isMultiRoot();
+    return isMultiRoot() && isAreaEnabled('Workspace');
   }
 
   getDescription(_env?: any): string {
@@ -363,9 +363,9 @@ export class GlobWorkspaceTool {
 
   getId() { return GlobWorkspaceTool.id; }
 
-  /** Only expose this tool when there are multiple workspace roots. */
+  /** Only expose this tool when there are multiple workspace roots and the workspace area is enabled. */
   enabled(_env?: any): boolean {
-    return isMultiRoot();
+    return isMultiRoot() && isAreaEnabled('Workspace');
   }
 
   getDescription(_env?: any): string {
@@ -510,9 +510,9 @@ export class GrepWorkspaceTool {
 
   getId() { return GrepWorkspaceTool.id; }
 
-  /** Only expose this tool when there are multiple workspace roots. */
+  /** Only expose this tool when there are multiple workspace roots and the workspace area is enabled. */
   enabled(_env?: any): boolean {
-    return isMultiRoot();
+    return isMultiRoot() && isAreaEnabled('Workspace');
   }
 
   getDescription(_env?: any): string {
@@ -699,9 +699,9 @@ export class WriteWorkspaceFileTool {
 
   getId() { return WriteWorkspaceFileTool.id; }
 
-  /** Only expose this tool when there are multiple workspace roots. */
+  /** Only expose this tool when there are multiple workspace roots and the workspace area is enabled. */
   enabled(_env?: any): boolean {
-    return isMultiRoot();
+    return isMultiRoot() && isAreaEnabled('Workspace');
   }
 
   getDescription(_env?: any): string {
@@ -831,7 +831,7 @@ export class InsertWorkspaceContentTool {
 
   getId() { return InsertWorkspaceContentTool.id; }
 
-  enabled(_env?: any): boolean { return isMultiRoot(); }
+  enabled(_env?: any): boolean { return isMultiRoot() && isAreaEnabled('Workspace'); }
 
   getDescription(_env?: any): string {
     return (
@@ -943,7 +943,7 @@ export class SearchAndReplaceWorkspaceTool {
 
   getId() { return SearchAndReplaceWorkspaceTool.id; }
 
-  enabled(_env?: any): boolean { return isMultiRoot(); }
+  enabled(_env?: any): boolean { return isMultiRoot() && isAreaEnabled('Workspace'); }
 
   getDescription(_env?: any): string {
     return (
@@ -1098,7 +1098,7 @@ export class ApplyDiffWorkspaceTool {
 
   getId() { return ApplyDiffWorkspaceTool.id; }
 
-  enabled(_env?: any): boolean { return isMultiRoot(); }
+  enabled(_env?: any): boolean { return isMultiRoot() && isAreaEnabled('Workspace'); }
 
   getDescription(_env?: any): string {
     return (
@@ -1218,7 +1218,7 @@ export class ExecuteWorkspaceCommandTool {
 
   getId() { return ExecuteWorkspaceCommandTool.id; }
 
-  enabled(_env?: any): boolean { return isMultiRoot(); }
+  enabled(_env?: any): boolean { return isMultiRoot() && isAreaEnabled('Workspace'); }
 
   getDescription(_env?: any): string {
     return [
@@ -1372,7 +1372,7 @@ export class ReadVideoFileWorkspaceTool {
 
   getId() { return ReadVideoFileWorkspaceTool.id; }
 
-  enabled(_env?: any): boolean { return isMultiRoot(); }
+  enabled(_env?: any): boolean { return isMultiRoot() && isAreaEnabled('Workspace') && isAreaEnabled('Video'); }
 
   getDescription(_env?: any): string {
     return (

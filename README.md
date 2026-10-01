@@ -23,14 +23,18 @@ PowerToys for Bob is an IBM Bob extension that **supercharges your development w
 
 ## Configuration
 
-The extension provides one configuration setting:
-
-**Breakpoint Notifications** (`breakpointNotifications`)
-- `disabled`: Never notify Bob when breakpoints are hit
-- `bobOnly` (default): Only notify for breakpoints set through Bob's tools
-- `all`: Notify for all breakpoint hits
-
 Access via: Bob Settings > Extensions > PowerToys for Bob
+
+**Tools** — enable or disable entire groups of tools and configure specific tool options. Changes take effect on the next Bob turn, no restart required.
+
+| Setting | Default | Controls |
+|---|---|---|
+| `bob-powertoys.tools.debug.enabled` | `true` | All debug and breakpoint tools (18 tools) |
+| `bob-powertoys.tools.debug.breakpointNotifications` | `bobOnly` | Breakpoint hit notifications (`disabled`, `bobOnly`, `all`) |
+| `bob-powertoys.tools.terminal.enabled` | `true` | Terminal tools (4 tools) |
+| `bob-powertoys.tools.workspace.enabled` | `true` | Multi-root workspace tools (active only in multi-root workspaces) |
+| `bob-powertoys.tools.video.enabled` | `true` | Video analysis tools |
+| `bob-powertoys.tools.extensions.enabled` | `true` | `list_extensions` tool |
 
 ## Usage
 
@@ -84,29 +88,23 @@ A **built-in tool redirect guard** intercepts any call to a sandboxed built-in t
 
 ## Available Tools
 
-Bob has access to 36 tools organized in 8 categories:
+Bob has access to **36 tools** organized in 7 categories. The active count depends on workspace type: in a single-root workspace all 11 multi-root workspace tools are hidden, so Bob sees **25 tools**; in a multi-root workspace all 36 are visible.
 
-### Breakpoint Management (3 tools)
+### Debug (18 tools)
 - `set_breakpoints` - Set multiple breakpoints with optional conditions
 - `remove_breakpoints` - Remove multiple breakpoints
 - `list_breakpoints` - List all active breakpoints
-
-### Debug Control (5 tools)
 - `step_over` - Step over current line
 - `step_into` - Step into function call
 - `step_out` - Step out of current function
 - `continue` - Continue execution
 - `pause` - Pause execution
-
-### Debug Console & Inspection (6 tools)
 - `evaluate_expression` - Evaluate expressions in debug context
 - `get_variables` - Get variables from a scope
 - `get_stack_trace` - Get call stack
 - `get_scopes` - Get variable scopes
 - `set_variable` - Modify variable values
 - `get_debug_output` - Get debug console output
-
-### Debug Session Management (4 tools)
 - `get_active_debug_session` - Get active session info
 - `list_debug_configurations` - List available debug configs
 - `start_debug_session` - Start debugging

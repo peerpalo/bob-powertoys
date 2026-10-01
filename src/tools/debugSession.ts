@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { paramsToSchema } from '../utils.js';
+import { paramsToSchema, isAreaEnabled } from '../utils.js';
 
 // ─── Tool classes ────────────────────────────────────────────────────────────
 
@@ -9,6 +9,7 @@ export class GetActiveDebugSessionTool {
   permission = 'read';
 
   getId() { return GetActiveDebugSessionTool.id; }
+  enabled(_env?: any): boolean { return isAreaEnabled('Debug'); }
 
   getDescription(_env?: any): string {
     return 'Get information about the currently active debug session, including its ID, name, type, and workspace folder.';
@@ -68,6 +69,7 @@ export class ListDebugConfigurationsTool {
   permission = 'read';
 
   getId() { return ListDebugConfigurationsTool.id; }
+  enabled(_env?: any): boolean { return isAreaEnabled('Debug'); }
 
   getDescription(_env?: any): string {
     return 'List all available debug configurations from launch.json files in all workspace folders. Shows configuration names, types, and settings.';
@@ -144,6 +146,7 @@ export class StartDebugSessionTool {
   permission = 'edit';
 
   getId() { return StartDebugSessionTool.id; }
+  enabled(_env?: any): boolean { return isAreaEnabled('Debug'); }
 
   getDescription(_env?: any): string {
     return 'Start a debug session using a configuration from launch.json. Can specify a configuration by name or provide context to auto-select the best match.';
@@ -298,6 +301,7 @@ export class StopDebugSessionTool {
   permission = 'edit';
 
   getId() { return StopDebugSessionTool.id; }
+  enabled(_env?: any): boolean { return isAreaEnabled('Debug'); }
 
   getDescription(_env?: any): string {
     return 'Stop the currently active debug session. Terminates the debugging process and cleans up resources.';

@@ -2,7 +2,7 @@
   "name": "bob-powertoys",
   "displayName": "PowerToys for Bob",
   "description": "Enhanced development tools for IBM Bob: debugging, terminal access, multi-root workspace support, and quality-of-life improvements.",
-  "version": "0.8.1",
+  "version": "0.8.3",
   "icon": "assets/icon.png",
   "license": "MIT",
   "publisher": "peerpalo",
@@ -74,7 +74,14 @@
     "configuration": {
       "title": "PowerToys for Bob",
       "properties": {
-        "breakpointNotifications": {
+        "bob-powertoys.tools.debug.enabled": {
+          "order": 1,
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Enable the **debug and breakpoints** tools. Changes take effect on the next Bob turn."
+        },
+        "bob-powertoys.tools.debug.breakpointNotifications": {
+          "order": 2,
           "title": "Breakpoint Notifications",
           "type": "string",
           "enum": [
@@ -89,6 +96,30 @@
           ],
           "default": "bobOnly",
           "description": "Controls when Bob is automatically notified about breakpoint hits"
+        },
+        "bob-powertoys.tools.terminal.enabled": {
+          "order": 3,
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Enable the **terminal** tools. Changes take effect on the next Bob turn."
+        },
+        "bob-powertoys.tools.workspace.enabled": {
+          "order": 4,
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Enable the **multi-root workspace** tools (only active in workspaces with 2+ root folders). Changes take effect on the next Bob turn."
+        },
+        "bob-powertoys.tools.video.enabled": {
+          "order": 5,
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Enable the **video analysis** tools. Requires ffmpeg on PATH. Changes take effect on the next Bob turn."
+        },
+        "bob-powertoys.tools.extensions.enabled": {
+          "order": 6,
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Enable the **extensions** tool. Changes take effect on the next Bob turn."
         }
       }
     }

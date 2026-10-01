@@ -694,7 +694,22 @@ Used in `package.json` as: `"when": "webviewId == bobChatView && bob-powertoys.h
 
 ## Configuration Settings
 
-### breakpointNotifications
+### Tool area settings (`bob-powertoys.tools.*`)
+
+Enable or disable entire groups of tools. All default to `true`. Changes take effect on the next Bob turn — no restart required.
+
+| Setting | Controls |
+|---|---|
+| `bob-powertoys.tools.debug.enabled` | All 18 debug and breakpoint tools |
+| `bob-powertoys.tools.debug.breakpointNotifications` | Breakpoint hit notification mode (`disabled`, `bobOnly`, `all`) |
+| `bob-powertoys.tools.terminal.enabled` | 4 terminal tools |
+| `bob-powertoys.tools.workspace.enabled` | 11 multi-root workspace tools (also gated on `isMultiRoot()`) |
+| `bob-powertoys.tools.video.enabled` | `read_video_file` + `read_workspace_video_file` (latter also gated on `isMultiRoot()`) |
+| `bob-powertoys.tools.extensions.enabled` | `list_extensions` |
+
+Read at call time via `isAreaEnabled(area)` in each tool's `enabled()` method — no registration-time gating, so no restart is needed.
+
+### bob-powertoys.tools.debug.breakpointNotifications
 
 Controls when Bob is automatically notified about breakpoint hits.
 
@@ -713,10 +728,11 @@ Controls when Bob is automatically notified about breakpoint hits.
 **Purpose**: Extension lifecycle and Bob integration only. No task or persistence logic.
 
 **Key functions**:
-- `activate(context)` - entry point; registers status bar, waits for Bob, calls `registerTaskCommands`
-- `registerPowerToys(context, bobExports)` - phase 1: calls `registerSource` then all `registerXxxTools`; always succeeds regardless of login state
+- `activate(context)` - entry point; registers status bar, waits for Bob, calls `registerTaskCommands`; registers `onDidChangeConfiguration` listener that logs area enable/disable changes
+- `registerPowerToys(context, bobExports)` - phase 1: wraps `source.registerTool` to collect all tool instances into `registeredTools[]`, calls `registerSource` then all `registerXxxTools`; always succeeds regardless of login state
 - `completeRegisterPowerToys(context, bobExports, source)` - phase 2: calls `registerTaskManager`, `registerTaskPersistence`, `restoreTasks`, debug adapter tracker; retries via `source.onEntitlementChange` if Bob is not yet logged in
-- `showStatus()` / `showStatusBarError()` - status bar management
+- `showStatus()` - displays active tool count (computed live from `registeredTools` via `enabled()`) and disabled areas
+- `showStatusBarError()` - status bar error state
 
 ### 2. taskManager.ts
 
@@ -781,6 +797,7 @@ resolveFrameId(frameId, resolveTopFrame): Promise<number|undefined>
 normaliseWorkspacePath(filePath: string): string    // normalises user-supplied relative paths for vscode.Uri.joinPath
 absolutiseToolContent(content, tool, workspaceRoot): string  // absolutises relative paths in glob/grep tool output
 resolveOpenFilePath(filePath, folders): string      // resolves ./folderName/... webview click paths to absolute
+isAreaEnabled(area: string): boolean                // reads bob-powertoys.tools.{area}.enabled from VS Code config; default true
 ```
 
 ### 4. Bob's Tool Interface
@@ -794,7 +811,8 @@ class MyTool {
   permission = 'read';     // or 'edit' / 'execute'
 
   getId(): string { return MyTool.id; }
-  enabled(_env?: any): boolean { return true; }  // optional: hide tool when false
+  enabled(_env?: any): boolean { return true; }  // optional: hide tool when false; called by Bob on every turn
+                                                  // use isAreaEnabled('Area') to gate on a config setting
   getDescription(_env?: any): string { ... }     // full description in system prompt
   getCostEffectiveDescription(): string { ... }  // brief one-liner for tool selection
 
@@ -844,18 +862,19 @@ class MyTool {
 
 ### 5. tools/ Directory
 
-| File | Tools | Count |
-|---|---|---|
-| `workspace.ts` | `list_workspace_folders`, `read_workspace_file`, `write_workspace_file`, `list_workspace_files`, `glob_workspace`, `grep_workspace`, `insert_workspace_content`, `search_and_replace_workspace`, `apply_diff_workspace`, `execute_workspace_command`, `read_workspace_video_file` | 11 |
-| `videos.ts` | `read_video_file` | 1 |
-| `breakpoints.ts` | `set_breakpoints`, `remove_breakpoints`, `list_breakpoints` | 3 |
-| `debugControl.ts` | `step_over`, `step_into`, `step_out`, `continue`, `pause` | 5 |
-| `debugConsole.ts` | `evaluate_expression`, `get_variables`, `get_stack_trace`, `get_scopes`, `set_variable`, `get_debug_output` | 6 |
-| `debugSession.ts` | `get_active_debug_session`, `list_debug_configurations`, `start_debug_session`, `stop_debug_session` | 4 |
-| `terminalConsole.ts` | `list_terminals`, `get_terminal_output`, `search_terminal_output`, `focus_terminal` | 4 |
-| `bobExtensions.ts` | `list_extensions` | 1 |
-| `universeAnswer.ts` | `universe_answer` | 1 |
-| **Total** | | **36** |
+| File | Tools | Count | Area setting |
+|---|---|---|---|
+| `workspace.ts` | `list_workspace_folders`, `read_workspace_file`, `write_workspace_file`, `list_workspace_files`, `glob_workspace`, `grep_workspace`, `insert_workspace_content`, `search_and_replace_workspace`, `apply_diff_workspace`, `execute_workspace_command` | 10 | `bob-powertoys.tools.workspace.enabled` + `isMultiRoot()` |
+| `workspace.ts` | `read_workspace_video_file` | 1 | `bob-powertoys.tools.workspace.enabled` + `bob-powertoys.tools.video.enabled` + `isMultiRoot()` |
+| `videos.ts` | `read_video_file` | 1 | `bob-powertoys.tools.video.enabled` |
+| `breakpoints.ts` | `set_breakpoints`, `remove_breakpoints`, `list_breakpoints` | 3 | `bob-powertoys.tools.debug.enabled` |
+| `debugControl.ts` | `step_over`, `step_into`, `step_out`, `continue`, `pause` | 5 | `bob-powertoys.tools.debug.enabled` |
+| `debugConsole.ts` | `evaluate_expression`, `get_variables`, `get_stack_trace`, `get_scopes`, `set_variable`, `get_debug_output` | 6 | `bob-powertoys.tools.debug.enabled` |
+| `debugSession.ts` | `get_active_debug_session`, `list_debug_configurations`, `start_debug_session`, `stop_debug_session` | 4 | `bob-powertoys.tools.debug.enabled` |
+| `terminalConsole.ts` | `list_terminals`, `get_terminal_output`, `search_terminal_output`, `focus_terminal` | 4 | `bob-powertoys.tools.terminal.enabled` |
+| `bobExtensions.ts` | `list_extensions` | 1 | `bob-powertoys.tools.extensions.enabled` |
+| `universeAnswer.ts` | `universe_answer` | 1 | always on |
+| **Total** | | **36** | 25 active in single-root, 36 in multi-root |
 
 ---
 
@@ -985,7 +1004,7 @@ npm run watch            # watch mode (background)
 [PowerToys for Bob] setCurrentTasks intercepted, tasks: 1
 [PowerToys for Bob] Saving last task: <taskId>
 [PowerToys for Bob] Restoring last task: <taskId>
-[PowerToys for Bob] Successfully registered 34 tools with Bob
+[PowerToys for Bob] Successfully registered 36 tools with Bob
 ```
 
 ---
