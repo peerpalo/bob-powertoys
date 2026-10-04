@@ -305,7 +305,7 @@ All callers follow the same three-step pattern:
 | `ReadWorkspaceFileTool` | `getBobTool('read_file')` | `env.workspace`, strips `workspace` param, adds `trackFileRead` shim |
 | `ListWorkspaceFilesTool` | `getBobTool('list_files')` | `env.workspace`, strips `workspace` param, retries with absolute path on error |
 | `GlobWorkspaceTool` | `getBobTool('glob')` | `env.workspace` per root (loops for all-folders case), strips `workspace` param |
-| `GrepWorkspaceTool` | `getBobTool('grep')` | `env.workspace` per root (loops for all-folders case), strips `workspace` param |
+| `GrepWorkspaceTool` | `getBobTool('grep')` | `env.workspace` per root (loops for all-folders case), strips `workspace` param, retries with absolute path on error |
 | `WriteWorkspaceFileTool` | `getBobTool('write_file')` | `env.workspace`, strips `workspace` param, adds `pushEdit` shim |
 | `InsertWorkspaceContentTool` | `getBobTool('insert_content')` | `env.workspace`, strips `workspace` param, adds `pushEdit` shim |
 | `SearchAndReplaceWorkspaceTool` | `getBobTool('search_and_replace')` | `env.workspace`, strips `workspace` param, adds `pushEdit` shim |
@@ -315,7 +315,7 @@ All callers follow the same three-step pattern:
 
 > **Why `read_workspace_video_file` does not use `getBobTool`**: Bob wraps every registered tool's `call` with a closure that calls `t.getEnvs()` to rebuild `env` from the live task at call time. This means any `env` object you pass in (including your patched `env.workspace`) is silently discarded. For Bob's own built-in tools this is fine — they read `env.workspace` from `t.getEnvs()` which is exactly what the wrapper sets. But `read_video_file` is *our* tool, so calling it through the wrapper would give it the unpatched primary workspace. The fix is to instantiate `ReadVideoFileTool` directly and call its `call()` method, bypassing the wrapper entirely.
 
-> **Subdirectory path handling in `list_workspace_files`**: In newer versions of Bob, delegating `list_files` with a relative subdirectory path against secondary workspace folders can fail if the underlying tool requires an absolute path (`path must be an absolute path`). `ListWorkspaceFilesTool` attempts execution with the relative path first; if `pushError` is triggered, it automatically falls back and retries using the fully resolved absolute path (`vscode.Uri.joinPath(resolved.uri, relPath).fsPath`).
+> **Subdirectory path handling in `list_workspace_files` and `grep_workspace`**: In newer versions of Bob, delegating `list_files` or `grep` with a relative subdirectory path against secondary workspace folders can fail if the underlying tool requires an absolute path (`path must be an absolute path`). `ListWorkspaceFilesTool` and `GrepWorkspaceTool` attempt execution with the relative path first; if `pushError` is triggered, they automatically fall back and retry using the fully resolved absolute path (`vscode.Uri.joinPath(folder.uri, relPath).fsPath`).
 
 ### Key internal objects accessed
 
