@@ -24,6 +24,8 @@ function expectRedirect(toolId: string, args: Record<string, any>) {
   expect(result, `expected redirect for ${toolId}`).toBeDefined();
   expect(result!.cancel).toBe(true);
   expect(result!.message).toContain(toolId);
+  expect(result!.note).toContain(toolId);
+  expect(result!.note).toBe(result!.message);
   return result!;
 }
 
