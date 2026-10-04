@@ -344,35 +344,36 @@ export class ListWorkspaceFilesTool {
     }
 
     const wsRoot = resolved.uri.fsPath;
-    let useAbsolutePath = false;
+    const fullPath = normaliseWorkspacePath(dirPath)
+      ? vscode.Uri.joinPath(resolved.uri, normaliseWorkspacePath(dirPath)).fsPath
+      : wsRoot;
+    const candidates = [dirPath, fullPath];
 
     // First attempt: call list_files with the relative path against wsRoot.
     // In newer versions of Bob, when inspecting subdirectories in secondary workspace
     // folders, list_files may enforce/expect an absolute path and call pushError.
     // If that happens, we catch the failure and retry using the fully resolved absolute path.
-    await listFilesTool.call({
-      ...context,
-      env: { ...context.env, workspace: wsRoot },
-      parameters: { path: dirPath, recursive },
-      pushResult: (text: string) =>
-        context.pushResult(absolutiseToolContent(text, 'glob', wsRoot)),
-      pushError: () => {
-        useAbsolutePath = true;
-      },
-    });
-
-    if (useAbsolutePath) {
-      const fullPath = normaliseWorkspacePath(dirPath)
-        ? vscode.Uri.joinPath(resolved.uri, normaliseWorkspacePath(dirPath)).fsPath
-        : wsRoot;
-
+    for (let i = 0; i < candidates.length; i++) {
+      const targetPath = candidates[i];
+      const isLast = i === candidates.length - 1;
+      let succeeded = false;
       await listFilesTool.call({
         ...context,
         env: { ...context.env, workspace: wsRoot },
-        parameters: { path: fullPath, recursive },
-        pushResult: (text: string) =>
-          context.pushResult(absolutiseToolContent(text, 'glob', wsRoot))
+        parameters: { path: targetPath, recursive },
+        pushResult: (text: string) => {
+          succeeded = true;
+          context.pushResult(absolutiseToolContent(text, 'glob', wsRoot));
+        },
+        pushError: (text: string) => {
+          if (isLast) {
+            context.pushError(text);
+          }
+        },
       });
+      if (succeeded) {
+        break;
+      }
     }
   }
 }
@@ -683,25 +684,49 @@ export class GrepWorkspaceTool {
     const chunks: string[] = [];
     for (const folder of roots) {
       const collected: string[] = [];
-      await grepTool.call({
-        ...context,
-        env: {
-          ...context.env,
-          workspace: folder.uri.fsPath,
-        },
-        parameters: {
-          pattern,
-          ...(subPath       !== undefined && { path:               subPath }),
-          ...(include       !== undefined && { include }),
-          ...(ignore_case   !== undefined && { ignore_case }),
-          ...(invert_match  !== undefined && { invert_match }),
-          ...(word_regexp   !== undefined && { word_regexp }),
-          ...(files_with_matches !== undefined && { files_with_matches }),
-        },
-        pushResult: (text: string) =>
-          collected.push(absolutiseToolContent(text, 'grep', folder.uri.fsPath)),
-        pushError:  (text: string) => context.pushError(text),
-      });
+      const fullPath = subPath && normaliseWorkspacePath(subPath)
+        ? vscode.Uri.joinPath(folder.uri, normaliseWorkspacePath(subPath)).fsPath
+        : undefined;
+      const pathCandidates = subPath ? [subPath, ...(fullPath ? [fullPath] : [])] : [undefined];
+
+      // First attempt: call grep with the relative path against folder.uri.fsPath.
+      // In newer versions of Bob, when searching subdirectories in secondary workspace
+      // folders, grep may enforce/expect an absolute path and call pushError.
+      // If that happens, we catch the failure and retry using the fully resolved absolute path.
+      for (let i = 0; i < pathCandidates.length; i++) {
+        const targetPath = pathCandidates[i];
+        const isLast = i === pathCandidates.length - 1;
+        let succeeded = false;
+        await grepTool.call({
+          ...context,
+          env: {
+            ...context.env,
+            workspace: folder.uri.fsPath,
+          },
+          parameters: {
+            pattern,
+            ...(targetPath    !== undefined && { path: targetPath }),
+            ...(include       !== undefined && { include }),
+            ...(ignore_case   !== undefined && { ignore_case }),
+            ...(invert_match  !== undefined && { invert_match }),
+            ...(word_regexp   !== undefined && { word_regexp }),
+            ...(files_with_matches !== undefined && { files_with_matches }),
+          },
+          pushResult: (text: string) => {
+            succeeded = true;
+            collected.push(absolutiseToolContent(text, 'grep', folder.uri.fsPath));
+          },
+          pushError: (text: string) => {
+            if (isLast) {
+              context.pushError(text);
+            }
+          },
+        });
+        if (succeeded) {
+          break;
+        }
+      }
+
       chunks.push(...collected);
     }
 
