@@ -303,7 +303,7 @@ All callers follow the same three-step pattern:
 | Caller | Delegates to | What it patches |
 |---|---|---|
 | `ReadWorkspaceFileTool` | `getBobTool('read_file')` | `env.workspace`, strips `workspace` param, adds `trackFileRead` shim |
-| `ListWorkspaceFilesTool` | `getBobTool('list_files')` | `env.workspace`, strips `workspace` param |
+| `ListWorkspaceFilesTool` | `getBobTool('list_files')` | `env.workspace`, strips `workspace` param, retries with absolute path on error |
 | `GlobWorkspaceTool` | `getBobTool('glob')` | `env.workspace` per root (loops for all-folders case), strips `workspace` param |
 | `GrepWorkspaceTool` | `getBobTool('grep')` | `env.workspace` per root (loops for all-folders case), strips `workspace` param |
 | `WriteWorkspaceFileTool` | `getBobTool('write_file')` | `env.workspace`, strips `workspace` param, adds `pushEdit` shim |
@@ -314,6 +314,8 @@ All callers follow the same three-step pattern:
 | `ReadVideoFileWorkspaceTool` | `new ReadVideoFileTool().call(...)` directly | `env.workspace` — cannot use `getBobTool` here (see note below) |
 
 > **Why `read_workspace_video_file` does not use `getBobTool`**: Bob wraps every registered tool's `call` with a closure that calls `t.getEnvs()` to rebuild `env` from the live task at call time. This means any `env` object you pass in (including your patched `env.workspace`) is silently discarded. For Bob's own built-in tools this is fine — they read `env.workspace` from `t.getEnvs()` which is exactly what the wrapper sets. But `read_video_file` is *our* tool, so calling it through the wrapper would give it the unpatched primary workspace. The fix is to instantiate `ReadVideoFileTool` directly and call its `call()` method, bypassing the wrapper entirely.
+
+> **Subdirectory path handling in `list_workspace_files`**: In newer versions of Bob, delegating `list_files` with a relative subdirectory path against secondary workspace folders can fail if the underlying tool requires an absolute path (`path must be an absolute path`). `ListWorkspaceFilesTool` attempts execution with the relative path first; if `pushError` is triggered, it automatically falls back and retries using the fully resolved absolute path (`vscode.Uri.joinPath(resolved.uri, relPath).fsPath`).
 
 ### Key internal objects accessed
 
@@ -502,11 +504,11 @@ Callback signature:
 ```typescript
 source.onToolWillExecute(
   (env: any, toolId: string, args: Record<string, any>) =>
-    { cancel: true; message: string } | undefined
+    { cancel: true; message: string; note: string } | undefined
 )
 ```
 
-Returning `{ cancel: true }` aborts execution before the sandbox runs. The `message` field is surfaced to the model as a tool error.
+Returning `{ cancel: true, note }` aborts execution before the sandbox runs. Bob surfaces the `note` field to the model as part of the cancellation message (`Tool call to <tool> was cancelled: <note>`). Both `note` and `message` are provided for compatibility.
 
 ### `BUILTIN_REDIRECTS` map
 

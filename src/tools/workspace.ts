@@ -344,13 +344,36 @@ export class ListWorkspaceFilesTool {
     }
 
     const wsRoot = resolved.uri.fsPath;
+    let useAbsolutePath = false;
+
+    // First attempt: call list_files with the relative path against wsRoot.
+    // In newer versions of Bob, when inspecting subdirectories in secondary workspace
+    // folders, list_files may enforce/expect an absolute path and call pushError.
+    // If that happens, we catch the failure and retry using the fully resolved absolute path.
     await listFilesTool.call({
       ...context,
       env: { ...context.env, workspace: wsRoot },
       parameters: { path: dirPath, recursive },
       pushResult: (text: string) =>
         context.pushResult(absolutiseToolContent(text, 'glob', wsRoot)),
+      pushError: () => {
+        useAbsolutePath = true;
+      },
     });
+
+    if (useAbsolutePath) {
+      const fullPath = normaliseWorkspacePath(dirPath)
+        ? vscode.Uri.joinPath(resolved.uri, normaliseWorkspacePath(dirPath)).fsPath
+        : wsRoot;
+
+      await listFilesTool.call({
+        ...context,
+        env: { ...context.env, workspace: wsRoot },
+        parameters: { path: fullPath, recursive },
+        pushResult: (text: string) =>
+          context.pushResult(absolutiseToolContent(text, 'glob', wsRoot))
+      });
+    }
   }
 }
 
@@ -1551,7 +1574,7 @@ const BUILTIN_REDIRECTS: Record<string, { replacement: string; pathParam: string
  *   - env:    task environment (getEnvs())
  *   - toolId: string tool name (a.signature.name)
  *   - args:   parsed parameter object (a.signature.arguments)
- * Returning { cancel: true } aborts execution and surfaces the message to the model.
+ * Returning { cancel: true, note: string } aborts execution and surfaces note to the model.
  */
 function registerBuiltinToolRedirectGuard(source: any) {
   source.onToolWillExecute((_env: any, toolId: string, args: Record<string, any>) => {
@@ -1563,14 +1586,14 @@ function registerBuiltinToolRedirectGuard(source: any) {
 /**
  * Pure detection logic for the redirect guard — separated for testability.
  *
- * Returns { cancel: true, message } when the call should be blocked, or
+ * Returns { cancel: true, note, message } when the call should be blocked, or
  * undefined when it should proceed normally.
  */
 export function checkBuiltinToolRedirect(
   toolId: string,
   args: Record<string, any>,
   folders: readonly { name: string; uri: { fsPath: string } }[],
-): { cancel: true; message: string } | undefined {
+): { cancel: true; message: string; note: string } | undefined {
   const redirect = BUILTIN_REDIRECTS[toolId];
   if (!redirect) { return; }
   if (folders.length < 2) { return; }  // single-root: no secondary folders, no issue
@@ -1593,15 +1616,18 @@ export function checkBuiltinToolRedirect(
 
   if (!secondaryFolder) { return; }
 
+  const text = (
+    `\`${toolId}\` is sandboxed to the primary workspace folder ` +
+    `("${folders[0].name}" at ${primaryFsPath}).\n` +
+    `The path "${rawPath}" is inside the secondary folder "${secondaryFolder.name}".\n` +
+    `Use \`${redirect.replacement}\` with workspace="${secondaryFolder.name}" instead, ` +
+    `and pass the path relative to that folder's root.`
+  );
+
   return {
     cancel: true,
-    message: (
-      `ERROR: \`${toolId}\` is sandboxed to the primary workspace folder ` +
-      `("${folders[0].name}" at ${primaryFsPath}).\n` +
-      `The path "${rawPath}" is inside the secondary folder "${secondaryFolder.name}".\n` +
-      `Use \`${redirect.replacement}\` with workspace="${secondaryFolder.name}" instead, ` +
-      `and pass the path relative to that folder's root.`
-    ),
+    message: text,
+    note: text,
   };
 }
 
