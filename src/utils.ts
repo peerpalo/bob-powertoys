@@ -28,6 +28,11 @@ export function isAreaEnabled(area: string): boolean {
   return vscode.workspace.getConfiguration('bob-powertoys').get<boolean>(`tools.${area.toLowerCase()}.enabled`, true);
 }
 
+/** True when the workspace has more than one root folder. */
+export function isMultiRoot(): boolean {
+  return (vscode.workspace.workspaceFolders?.length ?? 0) > 1;
+}
+
 // Cached taskManager instance - populated once by initTaskManager(), reused everywhere.
 let _cachedTaskManager: any = null;
 
@@ -97,6 +102,60 @@ export async function registerTaskManager(bobExports: any): Promise<void> {
  */
 export function getTaskManager(): any {
   return _cachedTaskManager;
+}
+
+// ─── First-party source override ──────────────────────────────────────────────
+
+// A source Bob itself registers as first-party; used as a marker in the
+// registry's `_firstPartySources` Set (see forceFirstParty).
+const FIRST_PARTY_MARKER = 'review';
+
+let _firstPartyPatched = false;
+
+/**
+ * Makes Bob's registry treat our source as first-party.
+ *
+ * Stock "IBM Bob" builds disable every non-first-party source (AddonManager:
+ * "Source ... is registered but disabled because third party extensions are
+ * disabled"). The public registerSource() drops the firstParty argument and the
+ * registry itself is not exposed, so:
+ *  1. the live `_disabledSources` array is captured through a one-shot
+ *     Array.prototype.includes wrapper (source.isEntitled() -> hasEntitlement())
+ *     and our id is removed from it;
+ *  2. a narrow Set.prototype.has override keeps `setDisabledSources()` (which
+ *     re-filters on every profile/extension change via
+ *     `_firstPartySources.has(id)`) from re-adding us.
+ *
+ * Depends on Bob internals (hasEntitlement using `.includes`, the 'review'
+ * source being first-party); may break silently on a Bob refactor.
+ *
+ * Returns true if `id` is no longer in the registry's disabled list.
+ */
+export function forceFirstParty(source: any, id: string): boolean {
+  if (!_firstPartyPatched) {
+    const has = Set.prototype.has;
+    Set.prototype.has = function (this: Set<unknown>, v: unknown) {
+      return has.call(this, v) || (v === id && has.call(this, FIRST_PARTY_MARKER));
+    };
+    _firstPartyPatched = true;
+  }
+
+  const includes = Array.prototype.includes;
+  let disabled: unknown[] | undefined;
+  Array.prototype.includes = function (this: unknown[], ...args: [unknown, number?]) {
+    disabled ??= this;
+    return includes.apply(this, args);
+  };
+  try {
+    source.isEntitled();
+  } finally {
+    Array.prototype.includes = includes;
+  }
+
+  if (!disabled) { return false; }
+  const i = disabled.indexOf(id);
+  if (i >= 0) { disabled.splice(i, 1); }
+  return !disabled.includes(id);
 }
 
 /**

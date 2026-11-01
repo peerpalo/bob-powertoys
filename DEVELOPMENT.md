@@ -8,7 +8,8 @@ bob-powertoys/
 │   ├── extension.ts              # Extension entry point and lifecycle
 │   ├── taskManager.ts            # Task commands, last-task persistence
 │   ├── debugAdapter.ts           # Centralized debug adapter tracker
-│   ├── utils.ts                  # Shared utilities: taskManager access, frame resolution
+│   ├── utils.ts                  # Shared utilities: taskManager access, frame resolution, forceFirstParty
+│   ├── mcpShare.ts               # Shares MCP sessions across workspace roots (see "MCP session sharing")
 │   └── tools/                    # Individual tool modules
 │       ├── workspace.ts          # Multi-root workspace tools (11 tools + prompt injection)
 │       ├── videos.ts             # Video frame extraction tools (2 tools)
@@ -152,7 +153,7 @@ If Bob is not yet logged in when the extension activates, `registerTaskManager` 
 ```typescript
 // Phase 1 — always works
 const source = bobExports.registerSource(EXTENSION_ID, EXTENSION_DISPLAY_NAME);
-source.firstParty = true;
+forceFirstParty(source, EXTENSION_ID);   // see "First-party source override" below
 registerBreakpointTools(source);
 // ... all other registerXxxTools calls ...
 
@@ -177,12 +178,58 @@ try {
 ```
 
 Key points:
-- **`source.firstParty = true`** — the public `registerSource` wrapper drops the third argument (`firstParty`), so it always defaults to `false` unless set directly. Without `firstParty=true`, any Bob build that calls `setDisabledSources()` will exclude this source: `sourceIsEnabled()` returns false and all tools disappear.
+- **`forceFirstParty(source, EXTENSION_ID)`** — stock "IBM Bob" builds disable third-party sources, so without it `sourceIsEnabled()` returns false and all tools disappear. See [First-party source override](#first-party-source-override).
 - `source.onEntitlementChange` fires when Bob logs in and re-evaluates entitlements — confirmed by testing. It fires even though our source is not a paid addon; Bob's `AddonManager.triggerEntitlementChange()` iterates all enabled sources in the registry.
 - `registerSource` and `registerTool` must happen **before** `completeRegisterPowerToys` so that our source is already in the registry (and thus receives `onEntitlementChange`) when Bob later logs in.
 - The `fired` guard makes the listener one-shot, preventing duplicate setup if the event fires more than once.
 - `source.isEntitled()` reflects **subscription** state, not login state — do not use it as a login gate.
 - `vscode.authentication.onDidChangeSessions` was previously used as the retry hook but is incorrect — it is a VS Code-level auth event, not tied to Bob's internal session state.
+
+### First-party source override
+
+Bob's `AddonManager` (`enableSources`) builds the `_disabledSources` list. When `disableThirdParty` is set, every source that is neither an add-on source nor in the registry's `_firstPartySources` Set is added to it, and Bob logs:
+
+```
+[AddonManager] Source "bob-powertoys" is registered but disabled because third party extensions are disabled.
+```
+
+`disableThirdParty` is `hostName === "IBM Bob"` (`vscode.env.appName`), so it applies to the stock build but not to Insiders (`"IBM Bob - Insiders"`). `sourceIsEnabled()` then returns false for our source and `getEnabledTools()` filters all our tools out.
+
+The only way into `_firstPartySources` is the third argument of the internal `registry.registerSource(id, name, firstParty)`. The public `registerSource(id, name)` wrapper drops it, nothing in Bob reads a `source.firstParty` property, and the registry is not exposed. `forceFirstParty(source, id)` in [`src/utils.ts`](src/utils.ts) therefore does two things:
+
+1. **Remove our id from `_disabledSources`.** `source.isEntitled()` calls `registry.hasEntitlement()`, which does `this._disabledSources.includes(id)`. For that one synchronous call, `Array.prototype.includes` is wrapped to capture the receiver (the live array); our id is spliced out and `includes` is restored in a `finally`.
+2. **Keep it out on later changes.** `setDisabledSources()` rebuilds the list on every profile/extension change with `filter(n => !this._firstPartySources.has(n))`. A `Set.prototype.has` override (installed once) returns `true` for our id when the Set also contains `'review'`, a source Bob itself registers as first-party. Other Sets are unaffected.
+
+The warning above is still logged after a successful override: it is emitted from a plain array copy before `setDisabledSources()`, so it cannot be used as a pass/fail signal. Success is logged by the extension as `forceFirstParty: applied` (visible in Developer Tools, since `logger` uses `console.log`).
+
+**Caveats**: this depends on Bob internals (`hasEntitlement` using `.includes`, `'review'` being first-party) and may break silently after a Bob update. It also bypasses an apparently intentional restriction on stock Bob; treat it as unsupported.
+
+### MCP session sharing
+
+Bob's `McpHub` keeps one registry (`workspaceRegistries`, keyed by workspace root) and one `MCPClient` per root. At startup the runtime does `Promise.all(workspaces.map(initWorkspace))`, so every global server in `~/.bob/settings/mcp.json` is started once per folder. `resolveServerConfigForWorkspace` adds `roots: [<this folder>]` and expands `${workspaceFolder}`, so Bob cannot assume two roots run the same server. In a 5-folder workspace a single global OAuth server logs `[mcp-use] info: Authentication required` five times.
+
+[`src/mcpShare.ts`](src/mcpShare.ts) makes roots whose server config is identical share one session. It has to run **before** Bob starts MCP, and that happens during Bob's own activation. The `McpHub` is not reachable that early, so it hooks objects Bob creates per root instead of the hub:
+
+1. **`installMcpShare()`** is the first call in `activate()`, before `bobExtension.activate()`, and only when the workspace has more than one root folder (`isMultiRoot()`). The decision is made once at activation: adding a second folder to a single-folder window needs a window reload before sharing applies. It installs an `Object.prototype` accessor for `startupComplete`. Bob's `startupForWorkspace` assigns `registry.startupComplete = true` right before it creates `registry.client`. The setter turns it back into an ordinary own property, so nothing else is affected. If the object looks like a registry (`serversByKey` is a `Map` and it has a `client` key), `registry.client` gets an accessor so every client Bob assigns is passed to `shareClient(client, registry.scopeRoot)`.
+2. **`shareClient()`** replaces `client.createSession(name, false)`, the call Bob makes in `startServerSession`. The key is `name` plus the server config with `roots`, `errlog`, `onElicitation` and `authProvider` removed. The first root registers its pending session synchronously, so roots started in parallel join it instead of connecting. Bob then calls `session.initialize()` and loads tools per root as usual.
+
+Lifecycle of a shared session:
+- `initialize()` is memoized, so an auth failure happens once and every root sees the same error.
+- The first `disconnect()` from any root unregisters the session so no new root can join it. This keeps "restart server" a real restart. The real `disconnect()` runs when the last holder releases it.
+- A failed session is dropped, so the next attempt starts fresh.
+
+Logging (Developer Tools console):
+```
+MCP share: "carbon-mcp" in C:\src\a starts a new session
+MCP share: "carbon-mcp" in C:\src\b reuses the session started by C:\src\a (2 roots share it)
+```
+
+**Limits and caveats**
+- The server sees only the first root in `roots`. A config with `${workspaceFolder}` resolves differently per root, so it is never shared.
+- Elicitation requests go through the first root's handler.
+- Depends on Bob internals (registry shape, the `startupComplete` then `client` assignment order, `MCPClient.createSession/getServerConfig/sessions/activeSessions`). If the hook fails, Bob falls back to one session per root.
+- **Activation order is the weak point.** Bob activates on `onStartupFinished` and starts MCP inside its own `activate()`. `installMcpShare()` only helps if our extension has activated first, and VS Code gives no ordering guarantee between two extensions on the same event. `activationEvents` lists `workspaceContains:**` (fires when a non-empty workspace opens, before `onStartupFinished`) plus `onStartupFinished` as a fallback. Verified on a multi-root workspace: only one `starts a new session` line per server. That is an observation, not a guarantee. If several `starts a new session` lines ever appear for the same server, we lost the race.
+- Tests: [`test/mcpShare.test.ts`](test/mcpShare.test.ts).
 
 ---
 
@@ -454,7 +501,7 @@ source.onTurnStart((taskId: string, _envs: any, isEmpty: boolean) => {
 | Condition | Reason |
 |---|---|
 | `isEmpty === true` | `onTurnStart` fires on every turn, including resume turns on an already-started task. `isEmpty` is `true` only when the task has **no prior messages** - i.e. the very first user message in a brand-new task. That's the only turn where the system message is freshly built and our injection needs to be added. |
-| `folders.length >= 2` | Injection is only meaningful in multi-root workspaces |
+| `workspaceToolsActive()` | Same gate as the workspace tools themselves (`isMultiRoot() && isAreaEnabled('Workspace')`). Injection is only meaningful in multi-root workspaces, and must not advertise tools that are hidden because the Workspace area is off. Evaluated on every `onTurnStart`, so toggling the setting needs no reload. |
 | `systemMessage.role === 'system'` | Guard against `messages` existing but not yet having a system entry |
 
 ### What was tried and why the alternatives failed
@@ -529,9 +576,15 @@ const BUILTIN_REDIRECTS: Record<string, { replacement: string; pathParam: string
 
 Relative paths are resolved against the primary workspace root (matching how Bob's built-in tools would resolve them). Absolute paths are used as-is. A path matches a secondary folder only when it equals the folder's `fsPath` exactly, or starts with `fsPath + path.sep` — preventing false matches against folders whose names share a common prefix (e.g. `/src/backend` must not match `/src/backend-v2`).
 
+### Gating
+
+The guard returns `undefined` (no cancel) unless `workspaceToolsActive()` is true. When the Workspace area is off or the workspace is single-root, the replacement `*_workspace_*` tools are hidden from the model, so redirecting to them would leave it with no way to read the file. The check runs on every call, not at registration.
+
 ### Testability
 
 The VS Code–dependent folder lookup is isolated to the thin `registerBuiltinToolRedirectGuard` wrapper. The pure detection logic lives in the exported [`checkBuiltinToolRedirect(toolId, args, folders)`](src/tools/workspace.ts) function, which takes the folders array as a parameter and has no VS Code dependency. See [`test/builtin-redirect-guard.test.ts`](test/builtin-redirect-guard.test.ts).
+
+The gating is covered by [`test/workspace-gating.test.ts`](test/workspace-gating.test.ts), which calls `registerWorkspaceTools(fakeSource)` and drives the captured `onTurnStart` / `onToolWillExecute` callbacks against the vscode mock.
 
 ---
 
@@ -705,8 +758,8 @@ Enable or disable entire groups of tools. All default to `true`. Changes take ef
 | `bob-powertoys.tools.debug.enabled` | All 18 debug and breakpoint tools |
 | `bob-powertoys.tools.debug.breakpointNotifications` | Breakpoint hit notification mode (`disabled`, `bobOnly`, `all`) |
 | `bob-powertoys.tools.terminal.enabled` | 4 terminal tools |
-| `bob-powertoys.tools.workspace.enabled` | 11 multi-root workspace tools (also gated on `isMultiRoot()`) |
-| `bob-powertoys.tools.video.enabled` | `read_video_file` + `read_workspace_video_file` (latter also gated on `isMultiRoot()`) |
+| `bob-powertoys.tools.workspace.enabled` | 11 multi-root workspace tools, the system-prompt injection and the built-in tool redirect guard (all gated on `workspaceToolsActive()`, i.e. also `isMultiRoot()`) |
+| `bob-powertoys.tools.video.enabled` | `read_video_file` + `read_workspace_video_file` (latter also gated on `workspaceToolsActive()`) |
 | `bob-powertoys.tools.extensions.enabled` | `list_extensions` |
 
 Read at call time via `isAreaEnabled(area)` in each tool's `enabled()` method — no registration-time gating, so no restart is needed.
@@ -791,6 +844,7 @@ flushPendingNotifications(): Promise<void>
 **Exported functions**:
 ```typescript
 extractTaskManager(bobExports: any): any            // internal hack, sync
+forceFirstParty(source: any, id: string): boolean   // re-enables our source on stock Bob (see First-party source override)
 registerTaskManager(bobExports: any): Promise<void> // resolves + caches, with retries
 getTaskManager(): any                               // returns cached instance
 findTaskChatManager(taskManager, taskId): any|null  // active + backgrounded lookup
@@ -866,8 +920,8 @@ class MyTool {
 
 | File | Tools | Count | Area setting |
 |---|---|---|---|
-| `workspace.ts` | `list_workspace_folders`, `read_workspace_file`, `write_workspace_file`, `list_workspace_files`, `glob_workspace`, `grep_workspace`, `insert_workspace_content`, `search_and_replace_workspace`, `apply_diff_workspace`, `execute_workspace_command` | 10 | `bob-powertoys.tools.workspace.enabled` + `isMultiRoot()` |
-| `workspace.ts` | `read_workspace_video_file` | 1 | `bob-powertoys.tools.workspace.enabled` + `bob-powertoys.tools.video.enabled` + `isMultiRoot()` |
+| `workspace.ts` | `list_workspace_folders`, `read_workspace_file`, `write_workspace_file`, `list_workspace_files`, `glob_workspace`, `grep_workspace`, `insert_workspace_content`, `search_and_replace_workspace`, `apply_diff_workspace`, `execute_workspace_command` | 10 | `workspaceToolsActive()` (`bob-powertoys.tools.workspace.enabled` + `isMultiRoot()`) |
+| `workspace.ts` | `read_workspace_video_file` | 1 | `workspaceToolsActive()` + `bob-powertoys.tools.video.enabled` |
 | `videos.ts` | `read_video_file` | 1 | `bob-powertoys.tools.video.enabled` |
 | `breakpoints.ts` | `set_breakpoints`, `remove_breakpoints`, `list_breakpoints` | 3 | `bob-powertoys.tools.debug.enabled` |
 | `debugControl.ts` | `step_over`, `step_into`, `step_out`, `continue`, `pause` | 5 | `bob-powertoys.tools.debug.enabled` |

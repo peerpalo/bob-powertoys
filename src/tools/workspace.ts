@@ -12,7 +12,7 @@
 
 import * as vscode from 'vscode';
 import * as path from 'path';
-import { getTaskManager, findTaskChatManager, getBobTool, normaliseWorkspacePath, paramsToSchema, createPatch, absolutiseToolContent, resolveOpenFilePath, isAreaEnabled } from '../utils.js';
+import { getTaskManager, findTaskChatManager, getBobTool, normaliseWorkspacePath, paramsToSchema, createPatch, absolutiseToolContent, resolveOpenFilePath, isAreaEnabled, isMultiRoot } from '../utils.js';
 import { ReadVideoFileTool, DEFAULT_VIDEO_FRAMES } from './videos.js';
 
 /** Return all workspace folder roots as { name, uri, fsPath, index } objects. */
@@ -53,11 +53,46 @@ function resolveInFolder(
   return { uri };
 }
 
+/**
+ * Full path shown in tool labels (Bob's own labels show the full path).
+ * `workspace` is only the folder name, so resolve it to the folder's fsPath.
+ * Falls back to the raw arguments when the folder can't be resolved, e.g. the
+ * empty args Bob passes to getLabels({}) while a tool call is still streaming.
+ */
+export function labelPath(workspace?: string, relPath?: string): string {
+  const resolved = resolveInFolder(workspace ?? '', relPath ?? '');
+  return 'uri' in resolved ? resolved.uri.fsPath : path.join(workspace ?? '', relPath ?? '');
+}
+
 // ─── Shared helpers ───────────────────────────────────────────────────────────
 
-/** True when the workspace has more than one root folder. */
-function isMultiRoot(): boolean {
-  return (vscode.workspace.workspaceFolders?.length ?? 0) > 1;
+const runningLongCache = new Map<string, string[]>();
+
+/**
+ * Bob's own `runningLong` labels ("Still writing...", ...) for a built-in tool.
+ * They don't depend on the arguments, and getLabels() has no task id, so look the
+ * tool up in any open task. Found values are cached per tool id; a miss is not
+ * cached, so it is retried once the tool becomes available.
+ */
+function bobRunningLong(toolId: string): string[] | undefined {
+  const cached = runningLongCache.get(toolId);
+  if (cached) { return cached; }
+  for (const cm of getTaskManager()?._chatManagers ?? []) {
+    try {
+      const tool = cm.currentTask?.getTools?.().find((t: any) => t.id === toolId);
+      const runningLong = tool?.getLabels?.({})?.runningLong;
+      if (runningLong) {
+        runningLongCache.set(toolId, runningLong);
+        return runningLong;
+      }
+    } catch { /* non-fatal: labels fall back to none */ }
+  }
+  return undefined;
+}
+
+/** True when the workspace tools are usable; gates the source-level hooks below. */
+function workspaceToolsActive(): boolean {
+  return isMultiRoot() && isAreaEnabled('Workspace');
 }
 
 // ─── Tool classes ─────────────────────────────────────────────────────────────
@@ -71,7 +106,7 @@ export class ListWorkspaceFoldersTool {
 
   /** Only expose this tool when there are multiple workspace roots and the workspace area is enabled. */
   enabled(_env?: any): boolean {
-    return isMultiRoot() && isAreaEnabled('Workspace');
+    return workspaceToolsActive();
   }
 
   getDescription(_env?: any): string {
@@ -143,7 +178,7 @@ export class ReadWorkspaceFileTool {
 
   /** Only expose this tool when there are multiple workspace roots and the workspace area is enabled. */
   enabled(_env?: any): boolean {
-    return isMultiRoot() && isAreaEnabled('Workspace');
+    return workspaceToolsActive();
   }
 
   getDescription(_env?: any): string {
@@ -193,7 +228,7 @@ export class ReadWorkspaceFileTool {
   getParameters(_env?: any): any[] { return ReadWorkspaceFileTool.PARAMS; }
 
   getLabels(args: Record<string, any>) {
-    const p = args?.path ? ` ${args.path}` : '';
+    const p = ` ${labelPath(args.workspace, args.path)}`;
     const r = args?.range ? ` (${args.range})` : '';
     return {
       displayName: `Read File${p}${r}`,
@@ -258,7 +293,7 @@ export class ListWorkspaceFilesTool {
 
   /** Only expose this tool when there are multiple workspace roots and the workspace area is enabled. */
   enabled(_env?: any): boolean {
-    return isMultiRoot() && isAreaEnabled('Workspace');
+    return workspaceToolsActive();
   }
 
   getDescription(_env?: any): string {
@@ -309,9 +344,7 @@ export class ListWorkspaceFilesTool {
   getParameters(_env?: any): any[] { return ListWorkspaceFilesTool.PARAMS; }
 
   getLabels(args: Record<string, any>) {
-    const loc = args?.workspace
-      ? `${args.workspace}${args.path ? `/${args.path}` : ''}`
-      : (args?.path ?? '.');
+    const loc = labelPath(args.workspace, args.path);
     const recursive = args?.recursive ? ' recursively' : '';
     return {
       displayName: `List Files in ${loc}`,
@@ -389,7 +422,7 @@ export class GlobWorkspaceTool {
 
   /** Only expose this tool when there are multiple workspace roots and the workspace area is enabled. */
   enabled(_env?: any): boolean {
-    return isMultiRoot() && isAreaEnabled('Workspace');
+    return workspaceToolsActive();
   }
 
   getDescription(_env?: any): string {
@@ -400,7 +433,7 @@ export class GlobWorkspaceTool {
       'Supports * (any chars within a path segment), ** (any path depth), and ? (single char). ' +
       'Examples: "**/*.ts", "src/**/*.test.ts", "*.json". ' +
       'Pass a workspace folder name to scope the search to one folder, or omit to search all. ' +
-      'Results are capped at 200 matches.'
+      'Results are capped at 100 matches per workspace folder.'
     );
   }
 
@@ -440,9 +473,7 @@ export class GlobWorkspaceTool {
 
   getLabels(args: Record<string, any>) {
     const pat = typeof args?.pattern === 'string' && args.pattern.trim() ? ` with pattern "${args.pattern}"` : '';
-    const loc = typeof args?.path === 'string' && args.path.trim()
-      ? ` in ${args.workspace ? `${args.workspace}/` : ''}${args.path}`
-      : (args?.workspace ? ` in ${args.workspace}` : '');
+    const loc = ` in ${labelPath(args.workspace, args.path)}`;
     return {
       displayName: `Find Files${loc}${pat}`,
       running: `Finding files${loc}${pat}`,
@@ -536,7 +567,7 @@ export class GrepWorkspaceTool {
 
   /** Only expose this tool when there are multiple workspace roots and the workspace area is enabled. */
   enabled(_env?: any): boolean {
-    return isMultiRoot() && isAreaEnabled('Workspace');
+    return workspaceToolsActive();
   }
 
   getDescription(_env?: any): string {
@@ -546,7 +577,7 @@ export class GrepWorkspaceTool {
       'MUST be used instead of grep for any directory not under the primary folder. ' +
       'Returns matching lines with file path and line number, grouped by file. ' +
       'Pass a workspace folder name to scope the search to one folder, or omit to search all. ' +
-      'Results are capped at 100 matching lines across all files.'
+      'Results are capped at 100 matching lines per workspace folder.'
     );
   }
 
@@ -621,9 +652,7 @@ export class GrepWorkspaceTool {
 
   getLabels(args: Record<string, any>) {
     const pat = typeof args?.pattern === 'string' && args.pattern.trim() ? ` for "${args.pattern}"` : '';
-    const loc = typeof args?.path === 'string' && args.path.trim()
-      ? ` in ${args.workspace ? `${args.workspace}/` : ''}${args.path}`
-      : (args?.workspace ? ` in ${args.workspace}` : '');
+    const loc = ` in ${labelPath(args.workspace, args.path)}`;
     return {
       displayName: `Search Files${loc}${pat}`,
       running: `Searching files${loc}${pat}`,
@@ -749,7 +778,7 @@ export class WriteWorkspaceFileTool {
 
   /** Only expose this tool when there are multiple workspace roots and the workspace area is enabled. */
   enabled(_env?: any): boolean {
-    return isMultiRoot() && isAreaEnabled('Workspace');
+    return workspaceToolsActive();
   }
 
   getDescription(_env?: any): string {
@@ -815,12 +844,13 @@ export class WriteWorkspaceFileTool {
   getParameters(_env?: any): any[] { return WriteWorkspaceFileTool.PARAMS; }
 
   getLabels(args: Record<string, any>) {
-    const p = args?.path ? ` ${args.path}` : '';
+    const p = ` ${labelPath(args.workspace, args.path)}`;
     return {
       displayName: `Write File${p}`,
       running: `Writing file${p}`,
       success: `Wrote file${p}`,
       error: `Failed to write file${p}`,
+      runningLong: bobRunningLong('write_file'),
     };
   }
 
@@ -879,7 +909,7 @@ export class InsertWorkspaceContentTool {
 
   getId() { return InsertWorkspaceContentTool.id; }
 
-  enabled(_env?: any): boolean { return isMultiRoot() && isAreaEnabled('Workspace'); }
+  enabled(_env?: any): boolean { return workspaceToolsActive(); }
 
   getDescription(_env?: any): string {
     return (
@@ -934,7 +964,7 @@ export class InsertWorkspaceContentTool {
   getParameters(_env?: any): any[] { return InsertWorkspaceContentTool.PARAMS; }
 
   getLabels(args: Record<string, any>) {
-    const loc = args?.path ? ` into ${args.workspace ? `${args.workspace}/` : ''}${args.path}` : '';
+    const loc = ` into ${labelPath(args.workspace, args.path)}`;
     return {
       displayName: `Insert Content${loc}`,
       running: `Inserting content${loc}`,
@@ -991,7 +1021,7 @@ export class SearchAndReplaceWorkspaceTool {
 
   getId() { return SearchAndReplaceWorkspaceTool.id; }
 
-  enabled(_env?: any): boolean { return isMultiRoot() && isAreaEnabled('Workspace'); }
+  enabled(_env?: any): boolean { return workspaceToolsActive(); }
 
   getDescription(_env?: any): string {
     return (
@@ -1071,7 +1101,7 @@ export class SearchAndReplaceWorkspaceTool {
   getParameters(_env?: any): any[] { return SearchAndReplaceWorkspaceTool.PARAMS; }
 
   getLabels(args: Record<string, any>) {
-    const loc = args?.path ? ` in ${args.workspace ? `${args.workspace}/` : ''}${args.path}` : '';
+    const loc = ` in ${labelPath(args.workspace, args.path)}`;
     return {
       displayName: `Search & Replace${loc}`,
       running: `Searching and replacing${loc}`,
@@ -1146,7 +1176,7 @@ export class ApplyDiffWorkspaceTool {
 
   getId() { return ApplyDiffWorkspaceTool.id; }
 
-  enabled(_env?: any): boolean { return isMultiRoot() && isAreaEnabled('Workspace'); }
+  enabled(_env?: any): boolean { return workspaceToolsActive(); }
 
   getDescription(_env?: any): string {
     return (
@@ -1194,12 +1224,13 @@ export class ApplyDiffWorkspaceTool {
   getParameters(_env?: any): any[] { return ApplyDiffWorkspaceTool.PARAMS; }
 
   getLabels(args: Record<string, any>) {
-    const loc = args?.path ? ` to ${args.workspace ? `${args.workspace}/` : ''}${args.path}` : '';
+    const loc = ` to ${labelPath(args.workspace, args.path)}`;
     return {
       displayName: `Apply Diff${loc}`,
       running:     `Applying diff${loc}`,
       success:     `Applied diff${loc}`,
       error:       `Failed to apply diff${loc}`,
+      runningLong: bobRunningLong('apply_diff'),
     };
   }
 
@@ -1266,7 +1297,7 @@ export class ExecuteWorkspaceCommandTool {
 
   getId() { return ExecuteWorkspaceCommandTool.id; }
 
-  enabled(_env?: any): boolean { return isMultiRoot() && isAreaEnabled('Workspace'); }
+  enabled(_env?: any): boolean { return workspaceToolsActive(); }
 
   getDescription(_env?: any): string {
     return [
@@ -1318,9 +1349,17 @@ export class ExecuteWorkspaceCommandTool {
     {
       name: 'timeout_seconds',
       type: 'number',
-      description: 'Override the default 300s timeout. Must be the minimum needed; maximum 1800s.',
-      detail: 'Timeout override in seconds (optional)',
+      description: 'Override the default 30s timeout for known slow commands (e.g. large installs, builds, test suites). Must be the minimum needed; maximum 270s.',
+      detail: 'Timeout override in seconds (optional, default 30, max 270)',
       required: false,
+    },
+    {
+      name: 'background',
+      type: 'boolean',
+      description: 'When true, runs the command in the background: stdout and stderr are redirected to a log file and the tool returns immediately with the process pid and the log file path. Use this for servers, watchers, and other long-running processes.',
+      detail: 'Run in background (optional)',
+      required: false,
+      renderHint: 'hidden',
     },
   ];
 
@@ -1331,11 +1370,13 @@ export class ExecuteWorkspaceCommandTool {
   getParameters(_env?: any): any[] { return ExecuteWorkspaceCommandTool.PARAMS; }
 
   getLabels(args: Record<string, any>) {
+    const loc = labelPath(args.workspace, args.cwd);
     return {
-      displayName: `Execute Workspace Command: ${args.workspace ?? ''}`,
-      running: `Running in ${args.workspace ?? ''}…`,
-      success: `Command completed in ${args.workspace ?? ''}`,
-      error: `Command failed in ${args.workspace ?? ''}`,
+      displayName: `Execute Workspace Command: ${loc}`,
+      running: `Running in ${loc}…`,
+      success: `Command completed in ${loc}`,
+      error: `Command failed in ${loc}`,
+      runningLong: bobRunningLong('execute_command'),
     };
   }
 
@@ -1346,7 +1387,7 @@ export class ExecuteWorkspaceCommandTool {
     pushError: (text: string) => void;
     log?: (...args: any[]) => void;
   }): Promise<void> {
-    const { workspace, command, cwd, timeout_seconds } = context.parameters;
+    const { workspace, command, cwd, timeout_seconds, background } = context.parameters;
 
     // Resolve the workspace folder to an absolute fsPath
     const cwdArg = (cwd && cwd !== '.') ? cwd : '';
@@ -1383,6 +1424,7 @@ export class ExecuteWorkspaceCommandTool {
         command,
         // cwd is not passed — execute_command defaults to env.workspace (now absoluteCwd)
         ...(timeout_seconds !== undefined && { timeout_seconds }),
+        ...(background !== undefined && { background }),
       },
     };
 
@@ -1420,7 +1462,7 @@ export class ReadVideoFileWorkspaceTool {
 
   getId() { return ReadVideoFileWorkspaceTool.id; }
 
-  enabled(_env?: any): boolean { return isMultiRoot() && isAreaEnabled('Workspace') && isAreaEnabled('Video'); }
+  enabled(_env?: any): boolean { return workspaceToolsActive() && isAreaEnabled('Video'); }
 
   getDescription(_env?: any): string {
     return (
@@ -1460,7 +1502,7 @@ export class ReadVideoFileWorkspaceTool {
   getParameters(_env?: any): any[] { return ReadVideoFileWorkspaceTool.PARAMS as any; }
 
   getLabels(args: Record<string, any>) {
-    const file = args?.video_path ? ` ${args.video_path}` : '';
+    const file = ` ${labelPath(args.workspace, args.video_path)}`;
     const hint = args?.vf_filter
       ? `filter: ${args.vf_filter}`
       : `${args?.frames_count ?? DEFAULT_VIDEO_FRAMES} frames`;
@@ -1531,10 +1573,9 @@ export function registerWorkspaceTools(source: any) {
  */
 function registerWorkspacePromptInjection(source: any) {
   source.onTurnStart((taskId: string, _envs: any, isEmpty: boolean) => {
-    const folders = vscode.workspace.workspaceFolders ?? [];
-    if (!isEmpty || folders.length < 2) { return; }
+    if (!isEmpty || !workspaceToolsActive()) { return; }
 
-    const injection = buildInjection(folders);
+    const injection = buildInjection(vscode.workspace.workspaceFolders ?? []);
 
     const MAX_POLLS = 50;
     const POLL_MS   = 10;
@@ -1603,8 +1644,9 @@ const BUILTIN_REDIRECTS: Record<string, { replacement: string; pathParam: string
  */
 function registerBuiltinToolRedirectGuard(source: any) {
   source.onToolWillExecute((_env: any, toolId: string, args: Record<string, any>) => {
-    const folders = vscode.workspace.workspaceFolders ?? [];
-    return checkBuiltinToolRedirect(toolId, args, folders);
+    // Redirecting to workspace tools that are hidden would leave the model stuck.
+    if (!workspaceToolsActive()) { return; }
+    return checkBuiltinToolRedirect(toolId, args, vscode.workspace.workspaceFolders ?? []);
   });
 }
 
