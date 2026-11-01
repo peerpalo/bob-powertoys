@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { normaliseWorkspacePath, paramsToSchema, isAreaEnabled } from '../src/utils.js';
+import { normaliseWorkspacePath, paramsToSchema, isAreaEnabled, forceFirstParty } from '../src/utils.js';
 import { mockConfig } from './__mocks__/vscode.js';
 
 describe('normaliseWorkspacePath', () => {
@@ -243,3 +243,30 @@ describe('isAreaEnabled', () => {
   });
 
 });
+
+describe('forceFirstParty', () => {
+  // Minimal replica of Bob's registry code paths we rely on.
+  class FakeRegistry {
+    firstParty = new Set<string>(['review']);
+    disabled: string[] = ['bob-powertoys'];
+    source = { isEntitled: () => this.hasEntitlement({ getId: () => 'bob-powertoys' }) };
+    hasEntitlement(t: { getId(): string }) { return !this.disabled.includes(t.getId()); }
+    setDisabledSources(ids: string[]) { this.disabled = ids.filter(n => !this.firstParty.has(n)); }
+  }
+
+  it('un-disables the source and survives setDisabledSources()', () => {
+    const r = new FakeRegistry();
+    expect(forceFirstParty(r.source, 'bob-powertoys')).toBe(true);
+    expect(r.disabled).toEqual([]);
+
+    r.setDisabledSources(['bob-powertoys', 'other']);
+    expect(r.disabled).toEqual(['other']);
+  });
+
+  it('leaves Sets without the first-party marker untouched and restores Array.prototype.includes', () => {
+    forceFirstParty(new FakeRegistry().source, 'bob-powertoys');
+    expect(new Set(['x']).has('bob-powertoys')).toBe(false);
+    expect([1].includes(1)).toBe(true);
+  });
+});
+

@@ -9,7 +9,8 @@ import { registerWorkspaceTools, registerWebviewToolNamePatch } from './tools/wo
 import { registerBobExtensionsTools } from './tools/bobExtensions.js';
 import { registerVideoTools } from './tools/videos.js';
 import { registerDebugAdapterTracker } from './debugAdapter.js';
-import { registerTaskManager, EXTENSION_ID, EXTENSION_DISPLAY_NAME, logger, isAreaEnabled } from './utils.js';
+import { registerTaskManager, forceFirstParty, EXTENSION_ID, EXTENSION_DISPLAY_NAME, logger, isAreaEnabled, isMultiRoot } from './utils.js';
+import { installMcpShare } from './mcpShare.js';
 import { registerTaskCommands, registerTaskPersistence, restoreTasks } from './taskManager.js';
 
 const BOB_EXTENSION_ID = 'IBM.bob-code';
@@ -46,6 +47,8 @@ async function migrateGlobalState(context: vscode.ExtensionContext): Promise<voi
 
 export function activate(context: vscode.ExtensionContext) {
   logger.log('Extension activating...');
+  // Must run before Bob activates (below): Bob starts MCP for every root during its own activation.
+  if (isMultiRoot()) { installMcpShare(); }
   migrateGlobalState(context); // fire-and-forget; runs before any task restore
 
   // Register terminal capture
@@ -120,16 +123,14 @@ async function registerPowerToys(context: vscode.ExtensionContext, bobExports: a
     }
 
     const source = bobExports.registerSource(EXTENSION_ID, EXTENSION_DISPLAY_NAME);
-    // The public registerSource wrapper drops the 3rd arg (firstParty) — set directly.
-    // Without firstParty=true, any Bob build that calls setDisabledSources() will put
-    // this source in _disabledSources: sourceIsEnabled() returns false, no tools appear.
-    source.firstParty = true;
-
     if (!source?.registerTool) {
       logger.error('Source registerTool method not found');
       showStatusBarError();
       return;
     }
+
+    // Stock Bob disables third-party sources; see forceFirstParty in utils.ts.
+    logger.log(`forceFirstParty: ${forceFirstParty(source, EXTENSION_ID) ? 'applied' : 'failed'}`);
 
     // Intercept registerTool to collect every tool instance as it is registered.
     // showStatus() uses the list to count active tools via enabled() at display time.

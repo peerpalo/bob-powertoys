@@ -99,7 +99,7 @@ export class ReadVideoFileTool {
   }
 
   getLabels(args: Record<string, any>) {
-    const file = path.basename(args?.video_path ?? 'video');
+    const file = args?.video_path;
     const hint = args?.vf_filter
       ? `filter: ${args.vf_filter}`
       : `${args?.frames_count ?? DEFAULT_VIDEO_FRAMES} frames`;
