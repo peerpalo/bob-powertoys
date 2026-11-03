@@ -61,7 +61,7 @@ describe('workspace tools enabled()', () => {
   it('are all enabled in a multi-root workspace with the area on', () => {
     const src = fakeSource();
     registerWorkspaceTools(src);
-    expect(src.tools).toHaveLength(11);
+    expect(src.tools).toHaveLength(13);
     expect(src.tools.every(t => t.enabled())).toBe(true);
   });
 
