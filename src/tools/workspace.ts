@@ -529,6 +529,7 @@ export class GlobWorkspaceTool {
     // Call glob once per root, collecting all output chunks
     const chunks: string[] = [];
     for (const folder of roots) {
+      let hasResult = false;
       const collected: string[] = [];
       await globTool.call({
         ...context,
@@ -541,11 +542,19 @@ export class GlobWorkspaceTool {
           // When a sub-path is given, pass it so Bob scopes the search to that directory
           ...(subPath ? { path: subPath } : {}),
         },
-        pushResult: (text: string) =>
-          collected.push(absolutiseToolContent(text, 'glob', folder.uri.fsPath)),
+        pushResult: (text: string) => {
+          hasResult = true;
+          collected.push(absolutiseToolContent(text, 'glob', folder.uri.fsPath));
+        },
         pushError:  (text: string) => context.pushError(text),
       });
-      chunks.push(...collected);
+      // Only include results from folders that actually matched — Bob pushes a
+      // "No files found" placeholder via pushResult on no-match, which we must
+      // suppress when aggregating across all folders. Tracking hasResult this way
+      // is immune to Bob changing the placeholder string.
+      if (hasResult) {
+        chunks.push(...collected);
+      }
     }
 
     if (chunks.length === 0) {
@@ -722,6 +731,7 @@ export class GrepWorkspaceTool {
       // In newer versions of Bob, when searching subdirectories in secondary workspace
       // folders, grep may enforce/expect an absolute path and call pushError.
       // If that happens, we catch the failure and retry using the fully resolved absolute path.
+      let folderMatched = false;
       for (let i = 0; i < pathCandidates.length; i++) {
         const targetPath = pathCandidates[i];
         const isLast = i === pathCandidates.length - 1;
@@ -752,11 +762,18 @@ export class GrepWorkspaceTool {
           },
         });
         if (succeeded) {
+          folderMatched = true;
           break;
         }
       }
 
-      chunks.push(...collected);
+      // Only include results from folders where pushResult actually fired.
+      // Bob pushes a no-results placeholder via pushResult on no-match, which
+      // we must suppress when aggregating across all folders. Tracking the flag
+      // this way is immune to Bob changing the placeholder string.
+      if (folderMatched) {
+        chunks.push(...collected);
+      }
     }
 
     if (chunks.length === 0) {
@@ -1432,6 +1449,260 @@ export class ExecuteWorkspaceCommandTool {
   }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Find a symbol by name/path pattern in any workspace folder.
+ *
+ * Bob's built-in FindSymbol calls `getWorkspaceSymbols(workspaceUri, name)`
+ * where workspaceUri is hardwired to `env.workspace` (the primary root).
+ * Patching `env.workspace` to the secondary folder root makes the language
+ * server query the right folder, and also fixes `filter_path` resolution
+ * (which is `path.resolve(env.workspace, filter_path)`).
+ */
+export class FindSymbolWorkspaceTool {
+  static id = 'find_symbol_workspace';
+  groups = ['read'];
+  permission = 'read';
+
+  getId() { return FindSymbolWorkspaceTool.id; }
+
+  enabled(_env?: any): boolean { return workspaceToolsActive(); }
+
+  getDescription(_env?: any): string {
+    return (
+      'Retrieves information on all symbols/code entities (classes, methods, etc.) based on ' +
+      'the given name path pattern, searching within any VS Code workspace folder. ' +
+      'MUST be used instead of FindSymbol for files in secondary workspace folders.\n\n' +
+      'Specify `depth > 0` to also retrieve children/descendants (e.g., methods of a class).\n\n' +
+      'The name_path_pattern can be:\n' +
+      ' * a simple name (e.g. "method"), which will match any symbol with that name\n' +
+      ' * a relative path like "class/method", which will match any symbol with that name path suffix'
+    );
+  }
+
+  getCostEffectiveDescription(): string {
+    return 'Find symbols by name in any workspace folder (use instead of FindSymbol for non-primary folders)';
+  }
+
+  private static readonly PARAMS = [
+    {
+      name: 'workspace',
+      type: 'string',
+      description: 'Workspace folder name as returned by list_workspace_folders (e.g. "backend").',
+      detail: 'Workspace folder name',
+      required: true,
+      usage: 'backend',
+      renderHint: 'hidden',
+    },
+    {
+      name: 'name_path_pattern',
+      type: 'string',
+      description: 'The name path pattern to search for (e.g. "MyClass" or "MyClass/myMethod").',
+      detail: 'Symbol name or path pattern',
+      required: true,
+    },
+    {
+      name: 'depth',
+      type: 'number',
+      description: 'Depth up to which descendants shall be retrieved. Default 0.',
+      detail: 'Child depth (0 = symbol only)',
+      required: false,
+    },
+    {
+      name: 'filter_path',
+      type: 'string',
+      description: 'File or directory path relative to the workspace folder root to restrict the search.',
+      detail: 'Path filter (relative to workspace folder)',
+      required: false,
+      usage: 'src/api',
+    },
+    {
+      name: 'include_body',
+      type: 'boolean',
+      description: 'If true, include the symbol\'s source code.',
+      detail: 'Include source body',
+      required: false,
+    },
+    {
+      name: 'substring_matching',
+      type: 'boolean',
+      description: 'If true, use substring matching for the last element of the pattern.',
+      detail: 'Substring match',
+      required: false,
+    },
+  ];
+
+  parameters = paramsToSchema(FindSymbolWorkspaceTool.PARAMS);
+  getParameters(_env?: any): any[] { return FindSymbolWorkspaceTool.PARAMS; }
+
+  getLabels(args: Record<string, any>) {
+    const loc = args.workspace ? ` in ${args.workspace}` : '';
+    const pat = args.name_path_pattern ? ` {name_path_pattern}` : '';
+    return {
+      displayName: `Find Symbol${pat}${loc}`,
+      running: `Finding symbol${pat}${loc}`,
+      success: `Symbol found${pat}${loc}`,
+      error: `Failed to find symbol${pat}${loc}`,
+    };
+  }
+
+  async call(context: {
+    env: any;
+    parameters: {
+      workspace: string;
+      name_path_pattern: string;
+      depth?: number;
+      filter_path?: string;
+      include_body?: boolean;
+      substring_matching?: boolean;
+    };
+    pushResult: (text: string) => void;
+    pushError: (text: string) => void;
+    [key: string]: any;
+  }): Promise<void> {
+    const { workspace, name_path_pattern, depth, filter_path, include_body, substring_matching } = context.parameters;
+
+    const resolved = resolveInFolder(workspace, '');
+    if ('error' in resolved) {
+      context.pushError(resolved.error);
+      return;
+    }
+
+    const findSymbolTool = getBobTool(context.env.id, 'FindSymbol');
+    if (!findSymbolTool) {
+      context.pushError('find_symbol_workspace: FindSymbol tool not found in current task.');
+      return;
+    }
+
+    await findSymbolTool.call({
+      ...context,
+      env: {
+        ...context.env,
+        workspace: resolved.uri.fsPath,
+      },
+      parameters: {
+        name_path_pattern,
+        ...(depth !== undefined && { depth }),
+        ...(filter_path !== undefined && { filter_path }),
+        ...(include_body !== undefined && { include_body }),
+        ...(substring_matching !== undefined && { substring_matching }),
+      },
+    });
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Find references to a symbol defined in any workspace folder.
+ *
+ * Bob's built-in FindReferencingSymbols resolves `relative_path` via
+ * `path.join(env.workspace, relative_path)`. Patching `env.workspace` to
+ * the secondary folder root and passing a path relative to that root
+ * makes the file URI resolve correctly.
+ */
+export class FindReferencingSymbolsWorkspaceTool {
+  static id = 'find_referencing_symbols_workspace';
+  groups = ['read'];
+  permission = 'read';
+
+  getId() { return FindReferencingSymbolsWorkspaceTool.id; }
+
+  enabled(_env?: any): boolean { return workspaceToolsActive(); }
+
+  getDescription(_env?: any): string {
+    return (
+      'Finds references to the symbol at the given name_path_pattern in any VS Code workspace folder. ' +
+      'MUST be used instead of FindReferencingSymbols for files in secondary workspace folders. ' +
+      'The result will contain metadata about the referencing symbols as well as a short code snippet around the reference.'
+    );
+  }
+
+  getCostEffectiveDescription(): string {
+    return 'Find references to a symbol in any workspace folder (use instead of FindReferencingSymbols for non-primary folders)';
+  }
+
+  private static readonly PARAMS = [
+    {
+      name: 'workspace',
+      type: 'string',
+      description: 'Workspace folder name as returned by list_workspace_folders (e.g. "backend").',
+      detail: 'Workspace folder name',
+      required: true,
+      usage: 'backend',
+      renderHint: 'hidden',
+    },
+    {
+      name: 'name_path_pattern',
+      type: 'string',
+      description: 'The name path pattern to search for.',
+      detail: 'Symbol name or path pattern',
+      required: true,
+    },
+    {
+      name: 'relative_path',
+      type: 'string',
+      description: 'File path relative to the workspace folder root containing the symbol.',
+      detail: 'File path relative to workspace folder',
+      required: true,
+      usage: 'src/utils/stringUtils.js',
+    },
+  ];
+
+  parameters = paramsToSchema(FindReferencingSymbolsWorkspaceTool.PARAMS);
+  getParameters(_env?: any): any[] { return FindReferencingSymbolsWorkspaceTool.PARAMS; }
+
+  getLabels(args: Record<string, any>) {
+    const loc = args.workspace ? ` in ${args.workspace}` : '';
+    const pat = args.name_path_pattern ? ` for {name_path_pattern}` : '';
+    return {
+      displayName: `Find Referencing Symbols${pat}${loc}`,
+      running: `Finding references${pat}${loc}`,
+      success: `References found${pat}${loc}`,
+      error: `Failed to find references${pat}${loc}`,
+    };
+  }
+
+  async call(context: {
+    env: any;
+    parameters: {
+      workspace: string;
+      name_path_pattern: string;
+      relative_path: string;
+    };
+    pushResult: (text: string) => void;
+    pushError: (text: string) => void;
+    [key: string]: any;
+  }): Promise<void> {
+    const { workspace, name_path_pattern, relative_path } = context.parameters;
+
+    const resolved = resolveInFolder(workspace, '');
+    if ('error' in resolved) {
+      context.pushError(resolved.error);
+      return;
+    }
+
+    const findRefTool = getBobTool(context.env.id, 'FindReferencingSymbols');
+    if (!findRefTool) {
+      context.pushError('find_referencing_symbols_workspace: FindReferencingSymbols tool not found in current task.');
+      return;
+    }
+
+    await findRefTool.call({
+      ...context,
+      env: {
+        ...context.env,
+        workspace: resolved.uri.fsPath,
+      },
+      parameters: {
+        name_path_pattern,
+        relative_path,
+      },
+    });
+  }
+}
+
 // ─── Registration ─────────────────────────────────────────────────────────────
 
 /**
@@ -1439,18 +1710,20 @@ export class ExecuteWorkspaceCommandTool {
  * These tools use vscode.workspace.fs directly, so they bypass Bob's
  * single-root sandbox and never trigger "outside workspace" confirmation prompts.
  *
- * Tools registered (11):
- *   list_workspace_folders        - discover all workspace roots
- *   read_workspace_file           - read any file (replaces read_file)
- *   write_workspace_file          - write/create any file (replaces write_file)
- *   list_workspace_files          - browse any directory (replaces list_files)
- *   glob_workspace                - find files by glob (replaces glob)
- *   grep_workspace                - search file contents (replaces grep)
- *   insert_workspace_content      - insert lines without overwriting (replaces insert_content)
- *   search_and_replace_workspace  - find/replace in file (replaces search_and_replace)
- *   apply_diff_workspace          - apply diff blocks (replaces apply_diff)
- *   execute_workspace_command     - run a command in any workspace folder (replaces execute_command)
- *   read_workspace_video_file     - extract video frames from any workspace folder (replaces read_video_file)
+ * Tools registered (13):
+ *   list_workspace_folders              - discover all workspace roots
+ *   read_workspace_file                 - read any file (replaces read_file)
+ *   write_workspace_file                - write/create any file (replaces write_file)
+ *   list_workspace_files                - browse any directory (replaces list_files)
+ *   glob_workspace                      - find files by glob (replaces glob)
+ *   grep_workspace                      - search file contents (replaces grep)
+ *   insert_workspace_content            - insert lines without overwriting (replaces insert_content)
+ *   search_and_replace_workspace        - find/replace in file (replaces search_and_replace)
+ *   apply_diff_workspace                - apply diff blocks (replaces apply_diff)
+ *   execute_workspace_command           - run a command in any workspace folder (replaces execute_command)
+ *   find_symbol_workspace               - find symbols by name (replaces FindSymbol)
+ *   find_referencing_symbols_workspace  - find symbol references (replaces FindReferencingSymbols)
+ *   read_workspace_video_file           - extract video frames from any workspace folder (replaces read_video_file)
  */
 
 // ─── Video workspace proxy ────────────────────────────────────────────────────
@@ -1557,6 +1830,8 @@ export function registerWorkspaceTools(source: any) {
   source.registerTool(new SearchAndReplaceWorkspaceTool());
   source.registerTool(new ApplyDiffWorkspaceTool());
   source.registerTool(new ExecuteWorkspaceCommandTool());
+  source.registerTool(new FindSymbolWorkspaceTool());
+  source.registerTool(new FindReferencingSymbolsWorkspaceTool());
   source.registerTool(new ReadVideoFileWorkspaceTool());
   registerWorkspacePromptInjection(source);
   registerBuiltinToolRedirectGuard(source);
@@ -1623,6 +1898,17 @@ const BUILTIN_REDIRECTS: Record<string, { replacement: string; pathParam: string
   apply_diff:           { replacement: 'apply_diff_workspace',          pathParam: 'path' },
   execute_command:      { replacement: 'execute_workspace_command',     pathParam: 'cwd' },
   read_video_file:      { replacement: 'read_workspace_video_file',     pathParam: 'video_path' },
+};
+
+/**
+ * Symbol tools that need workspace variants — listed separately from
+ * BUILTIN_REDIRECTS because they have no single path parameter to intercept
+ * and cannot be caught by the redirect guard. They are included only in the
+ * system-prompt injection so the model knows to use them.
+ */
+const SYMBOL_TOOL_REDIRECTS: Record<string, string> = {
+  FindSymbol:               'find_symbol_workspace',
+  FindReferencingSymbols:   'find_referencing_symbols_workspace',
 };
 
 /**
@@ -1701,8 +1987,15 @@ export function checkBuiltinToolRedirect(
 function buildInjection(folders: readonly vscode.WorkspaceFolder[]): string {
   const folderLines = folders.map(f => `  - name="${f.name}"  fsPath="${f.uri.fsPath}"`);
   const builtinNames = Object.keys(BUILTIN_REDIRECTS).join(', ');
-  const maxLen = Math.max(...Object.values(BUILTIN_REDIRECTS).map(r => r.replacement.length));
+  const allReplacements = [
+    ...Object.values(BUILTIN_REDIRECTS).map(r => r.replacement),
+    ...Object.values(SYMBOL_TOOL_REDIRECTS),
+  ];
+  const maxLen = Math.max(...allReplacements.map(r => r.length));
   const toolLines = Object.entries(BUILTIN_REDIRECTS).map(([builtin, { replacement }]) =>
+    `  ${replacement.padEnd(maxLen)}  - replaces ${builtin}`
+  );
+  const symbolToolLines = Object.entries(SYMBOL_TOOL_REDIRECTS).map(([builtin, replacement]) =>
     `  ${replacement.padEnd(maxLen)}  - replaces ${builtin}`
   );
   return [
@@ -1719,6 +2012,9 @@ function buildInjection(folders: readonly vscode.WorkspaceFolder[]): string {
     '',
     'You MUST use the workspace-specific tools for any secondary folder:',
     ...toolLines,
+    '',
+    'For symbol search in secondary folders, use the workspace-specific variants:',
+    ...symbolToolLines,
     '',
     'WORKFLOW: call list_workspace_folders → copy the folder "name" → pass it as the',
     '"workspace" parameter to the tool above.',

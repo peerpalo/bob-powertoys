@@ -358,6 +358,8 @@ All callers follow the same three-step pattern:
 | `SearchAndReplaceWorkspaceTool` | `getBobTool('search_and_replace')` | `env.workspace`, strips `workspace` param, adds `pushEdit` shim |
 | `ApplyDiffWorkspaceTool` | `getBobTool('apply_diff')` | `env.workspace`, strips `workspace` param, adds `pushEdit` shim |
 | `ExecuteWorkspaceCommandTool` | `getBobTool('execute_command')` | `env.workspace` set to resolved `cwd`, strips `workspace` and `cwd` params |
+| `FindSymbolWorkspaceTool` | `getBobTool('FindSymbol')` | `env.workspace`, strips `workspace` param — fixes `getWorkspaceSymbols` and `filter_path` resolution |
+| `FindReferencingSymbolsWorkspaceTool` | `getBobTool('FindReferencingSymbols')` | `env.workspace`, strips `workspace` param — fixes `path.join(env.workspace, relative_path)` resolution |
 | `ReadVideoFileWorkspaceTool` | `new ReadVideoFileTool().call(...)` directly | `env.workspace` — cannot use `getBobTool` here (see note below) |
 
 > **Why `read_workspace_video_file` does not use `getBobTool`**: Bob wraps every registered tool's `call` with a closure that calls `t.getEnvs()` to rebuild `env` from the live task at call time. This means any `env` object you pass in (including your patched `env.workspace`) is silently discarded. For Bob's own built-in tools this is fine — they read `env.workspace` from `t.getEnvs()` which is exactly what the wrapper sets. But `read_video_file` is *our* tool, so calling it through the wrapper would give it the unpatched primary workspace. The fix is to instantiate `ReadVideoFileTool` directly and call its `call()` method, bypassing the wrapper entirely.
@@ -758,7 +760,7 @@ Enable or disable entire groups of tools. All default to `true`. Changes take ef
 | `bob-powertoys.tools.debug.enabled` | All 18 debug and breakpoint tools |
 | `bob-powertoys.tools.debug.breakpointNotifications` | Breakpoint hit notification mode (`disabled`, `bobOnly`, `all`) |
 | `bob-powertoys.tools.terminal.enabled` | 4 terminal tools |
-| `bob-powertoys.tools.workspace.enabled` | 11 multi-root workspace tools, the system-prompt injection and the built-in tool redirect guard (all gated on `workspaceToolsActive()`, i.e. also `isMultiRoot()`) |
+| `bob-powertoys.tools.workspace.enabled` | 13 multi-root workspace tools, the system-prompt injection and the built-in tool redirect guard (all gated on `workspaceToolsActive()`, i.e. also `isMultiRoot()`) |
 | `bob-powertoys.tools.video.enabled` | `read_video_file` + `read_workspace_video_file` (latter also gated on `workspaceToolsActive()`) |
 | `bob-powertoys.tools.extensions.enabled` | `list_extensions` |
 
@@ -920,7 +922,7 @@ class MyTool {
 
 | File | Tools | Count | Area setting |
 |---|---|---|---|
-| `workspace.ts` | `list_workspace_folders`, `read_workspace_file`, `write_workspace_file`, `list_workspace_files`, `glob_workspace`, `grep_workspace`, `insert_workspace_content`, `search_and_replace_workspace`, `apply_diff_workspace`, `execute_workspace_command` | 10 | `workspaceToolsActive()` (`bob-powertoys.tools.workspace.enabled` + `isMultiRoot()`) |
+| `workspace.ts` | `list_workspace_folders`, `read_workspace_file`, `write_workspace_file`, `list_workspace_files`, `glob_workspace`, `grep_workspace`, `insert_workspace_content`, `search_and_replace_workspace`, `apply_diff_workspace`, `execute_workspace_command`, `find_symbol_workspace`, `find_referencing_symbols_workspace` | 12 | `workspaceToolsActive()` (`bob-powertoys.tools.workspace.enabled` + `isMultiRoot()`) |
 | `workspace.ts` | `read_workspace_video_file` | 1 | `workspaceToolsActive()` + `bob-powertoys.tools.video.enabled` |
 | `videos.ts` | `read_video_file` | 1 | `bob-powertoys.tools.video.enabled` |
 | `breakpoints.ts` | `set_breakpoints`, `remove_breakpoints`, `list_breakpoints` | 3 | `bob-powertoys.tools.debug.enabled` |
@@ -930,11 +932,11 @@ class MyTool {
 | `terminalConsole.ts` | `list_terminals`, `get_terminal_output`, `search_terminal_output`, `focus_terminal` | 4 | `bob-powertoys.tools.terminal.enabled` |
 | `bobExtensions.ts` | `list_extensions` | 1 | `bob-powertoys.tools.extensions.enabled` |
 | `universeAnswer.ts` | `universe_answer` | 1 | always on |
-| **Total** | | **36** | 25 active in single-root, 36 in multi-root |
+| **Total** | | **38** | 25 active in single-root, 38 in multi-root |
 
 ---
 
-## Complete Tool Reference (36 Tools)
+## Complete Tool Reference (38 Tools)
 
 ### Breakpoint Tools (3)
 | Tool | Description |
@@ -995,6 +997,8 @@ class MyTool {
 | `search_and_replace_workspace` | Find-and-replace text (literal or regex) in a file in any workspace folder (replaces `search_and_replace`) |
 | `apply_diff_workspace` | Apply a SEARCH/REPLACE diff block to a file in any workspace folder using Bob's fuzzy diff engine (replaces `apply_diff`) |
 | `execute_workspace_command` | Run a CLI command with its working directory in any workspace folder (replaces `execute_command` for non-primary folders) |
+| `find_symbol_workspace` | Find symbols by name/path pattern in any workspace folder (replaces `FindSymbol` for non-primary folders) |
+| `find_referencing_symbols_workspace` | Find references to a symbol in any workspace folder (replaces `FindReferencingSymbols` for non-primary folders) |
 | `read_workspace_video_file` | Extract video frames from any workspace folder (replaces `read_video_file` for non-primary folders) |
 
 Tools `list_workspace_folders` through `execute_workspace_command` delegate entirely to the corresponding Bob built-in via `getBobTool`, inheriting output format, error messages, undo tracking, and future improvements automatically. `read_workspace_video_file` is different: it calls `new ReadVideoFileTool().call(...)` directly instead of going through `getBobTool`, because Bob wraps registered tools and re-injects `env` from the live task at call time — which would discard the patched `env.workspace`. See **Delegation pattern** below.
