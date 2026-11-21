@@ -13,11 +13,7 @@ export const logger = {
 };
 
 import * as path from 'path';
-import { existsSync } from 'fs';
-import { createPatch } from 'diff';
 import * as vscode from 'vscode';
-
-export { createPatch };
 
 /**
  * Returns true when the given tool area is enabled in settings.
@@ -186,6 +182,10 @@ export function findTaskChatManager(taskManager: any, taskId: string): any | nul
  *
  * Returns null if the task manager is not ready, the task is not found, or the
  * requested tool is not present in the current mode.
+ *
+ * Currently unused — kept because it is the documented way to reach Bob's
+ * live built-in tool instances (e.g. to delegate a call with a patched
+ * `env`, as the former `*_workspace` proxy tools did).
  */
 export function getBobTool(taskId: string, toolId: string): any {
   const taskManager = _cachedTaskManager;
@@ -308,64 +308,10 @@ export function paramsToSchema(params: ReadonlyArray<{
   };
 }
 
-// ─── Workspace path helpers (used by workspace tools + webview patch) ─────────
-
-/**
- * Absolutise relative file paths in a glob or grep tool-result string.
- *
- * Bob's formatOutput / formatFilesOutput always writes one path per line
- * (glob) or `<path>:` header lines (grep), using path.relative() — so every
- * line is either a well-formed relative path or already absolute.
- *
- * @param content       Raw text returned by Bob's tool.
- * @param tool          'glob' for glob/list_files output; 'grep' for grep output.
- * @param workspaceRoot Absolute path of the folder the tool ran against.
- */
-export function absolutiseToolContent(
-  content: string,
-  tool: 'glob' | 'grep',
-  workspaceRoot: string,
-): string {
-  if (!workspaceRoot || !content) { return content; }
-
-  if (tool === 'glob') {
-    // Each line is a path.relative() result — leave already-absolute lines alone.
-    return content.split('\n').map(line => {
-      const trimmed = line.trim();
-      if (!trimmed || path.isAbsolute(trimmed)) { return line; }
-      // If the line has no path separator but contains a space it is ambiguous:
-      // it could be a root-level filename with spaces ("My File.ts") or prose
-      // ("No files found").  Resolve the ambiguity with an existence check —
-      // only absolutise if the joined path actually exists on disk.
-      const hasSeparator = trimmed.includes('/') || trimmed.includes('\\');
-      if (!hasSeparator && trimmed.includes(' ')) {
-        const candidate = path.join(workspaceRoot, trimmed);
-        return existsSync(candidate) ? candidate : line;
-      }
-      return path.join(workspaceRoot, trimmed);
-    }).join('\n');
-  }
-
-  // grep: file-header lines are `<relPath>:` — strip the colon, absolutise, restore it.
-  return content.split('\n').map(line => {
-    if (!line.endsWith(':')) { return line; }
-    const filePath = line.slice(0, -1);
-    if (!filePath || path.isAbsolute(filePath)) { return line; }
-    // Same space-at-root ambiguity as the glob branch: a line like "My File.ts:"
-    // could be a valid file header or accidental prose ending with a colon.
-    // Only absolutise if the file actually exists on disk.
-    const hasSeparator = filePath.includes('/') || filePath.includes('\\');
-    if (!hasSeparator && filePath.includes(' ')) {
-      const candidate = path.join(workspaceRoot, filePath);
-      return existsSync(candidate) ? candidate + ':' : line;
-    }
-    return path.join(workspaceRoot, filePath) + ':';
-  }).join('\n');
-}
 
 /**
  * Resolve a relative file path that starts with a known workspace folder name
- * (e.g. `"./process-discovery/src/api/foo.js"`) to its absolute path.
+ * (e.g. `"./backend/src/api/foo.js"`) to its absolute path.
  *
  * Bob's `kH()` resolver uses the primary workspace root for all relative paths,
  * so clicks on secondary-folder file mentions open the wrong file.  This

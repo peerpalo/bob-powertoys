@@ -22,7 +22,7 @@ const tscWatchPlugin = {
 };
 
 /** @type {import('esbuild').BuildOptions} */
-const buildOptions = {
+const extensionOptions = {
   entryPoints: ['src/extension.ts'],
   bundle: true,
   outfile: 'out/extension.js',
@@ -36,12 +36,33 @@ const buildOptions = {
   plugins: watch ? [tscWatchPlugin] : [],
 };
 
+/**
+ * Browser bundle for the MCP Apps panel webview (src/mcp/appBridge.ts).
+ * Bundles the official @modelcontextprotocol/ext-apps AppBridge; loaded by
+ * the panel document via webview.asWebviewUri(). Must NOT import 'vscode'.
+ * @type {import('esbuild').BuildOptions} */
+const bridgeOptions = {
+  entryPoints: ['src/mcp/appBridge.ts'],
+  bundle: true,
+  outfile: 'out/mcp/appBridge.js',
+  format: 'iife',
+  platform: 'browser',
+  target: 'es2022',
+  sourcemap: false,
+  minify: true,  // always: no source map means no debug value in readable output
+  logLevel: 'silent',
+  plugins: watch ? [tscWatchPlugin] : [],
+};
+
 async function main() {
   if (watch) {
-    const ctx = await esbuild.context(buildOptions);
+    const ctx = await esbuild.context(extensionOptions);
     await ctx.watch();
+    // The bridge bundle changes rarely — build it once per watch session.
+    await esbuild.build({ ...bridgeOptions, logLevel: 'info' });
   } else {
-    await esbuild.build({ ...buildOptions, logLevel: 'info' });
+    await esbuild.build({ ...extensionOptions, logLevel: 'info' });
+    await esbuild.build({ ...bridgeOptions, logLevel: 'info' });
   }
 }
 

@@ -1,19 +1,27 @@
 /**
- * Workspace tools - bypass Bob's single-root sandbox so Bob can read any file
- * from any folder in a multi-root VS Code workspace without per-file confirmation.
+ * Workspace tools — multi-root workspace support for Bob.
  *
- * Root cause: Bob's built-in read_file / list_files / grep / glob tools pass
- * only the primary workspace folder to `isOutsideWorkspace()`, so every file in
- * a second or third workspace root triggers the "allow outside workspace?" prompt.
+ * The heavy lifting is done by the multi-root sandbox patch (below): it makes
+ * Bob's own outside-workspace check aware of every workspace folder, so ALL
+ * built-in tools (read_file, write_file, list_files, glob, grep,
+ * insert_content, search_and_replace, apply_diff, execute_command,
+ * FindSymbol, FindReferencingSymbols, ...) work on secondary folders exactly
+ * like on the primary one — no block, no approval prompt, and no reliance on
+ * Bob's "Allow outside workspace" flags. No per-tool proxies are needed.
  *
- * These tools use `vscode.workspace.fs` directly from the extension-host process,
- * which has no such sandbox - all workspace folders are treated equally.
+ * What is left here:
+ *   - list_workspace_folders — the one tool with no built-in equivalent
+ *     (discover the root folders; environment_info only shows the primary)
+ *   - the system-prompt injection that teaches the model the multi-root path
+ *     rules
+ *   - the webview patch that keeps click-to-open working for secondary folders
  */
 
 import * as vscode from 'vscode';
 import * as path from 'path';
-import { getTaskManager, findTaskChatManager, getBobTool, normaliseWorkspacePath, paramsToSchema, createPatch, absolutiseToolContent, resolveOpenFilePath, isAreaEnabled, isMultiRoot } from '../utils.js';
-import { ReadVideoFileTool, DEFAULT_VIDEO_FRAMES } from './videos.js';
+import * as os from 'os';
+import { existsSync } from 'fs';
+import { getTaskManager, findTaskChatManager, normaliseWorkspacePath, paramsToSchema, resolveOpenFilePath, isMultiRoot, logger } from '../utils.js';
 
 /** Return all workspace folder roots as { name, uri, fsPath, index } objects. */
 function getWorkspaceFolders() {
@@ -25,76 +33,6 @@ function getWorkspaceFolders() {
   }));
 }
 
-/**
- * Resolve a file/dir path to a vscode.Uri using an explicit workspace folder name.
- *
- * @param folderName  The workspace folder name as returned by list_workspace_folders.
- * @param filePath    Path relative to that folder root (e.g. "src/app.ts").
- *                    Pass an empty string or "." to refer to the folder root itself.
- * @returns The resolved Uri, or null with a reason string if lookup fails.
- */
-function resolveInFolder(
-  folderName: string,
-  filePath: string
-): { uri: vscode.Uri } | { error: string } {
-  const folders = vscode.workspace.workspaceFolders ?? [];
-  if (folders.length === 0) {
-    return { error: 'No workspace folders are open.' };
-  }
-
-  const folder = folders.find(f => f.name === folderName);
-  if (!folder) {
-    const names = folders.map(f => f.name).join(', ');
-    return { error: `Unknown workspace folder "${folderName}". Available folders: ${names}` };
-  }
-
-  const rel = normaliseWorkspacePath(filePath);
-  const uri = rel ? vscode.Uri.joinPath(folder.uri, rel) : folder.uri;
-  return { uri };
-}
-
-/**
- * Full path shown in tool labels (Bob's own labels show the full path).
- * `workspace` is only the folder name, so resolve it to the folder's fsPath.
- * Falls back to the raw arguments when the folder can't be resolved, e.g. the
- * empty args Bob passes to getLabels({}) while a tool call is still streaming.
- */
-export function labelPath(workspace?: string, relPath?: string): string {
-  const resolved = resolveInFolder(workspace ?? '', relPath ?? '');
-  return 'uri' in resolved ? resolved.uri.fsPath : path.join(workspace ?? '', relPath ?? '');
-}
-
-// ─── Shared helpers ───────────────────────────────────────────────────────────
-
-const runningLongCache = new Map<string, string[]>();
-
-/**
- * Bob's own `runningLong` labels ("Still writing...", ...) for a built-in tool.
- * They don't depend on the arguments, and getLabels() has no task id, so look the
- * tool up in any open task. Found values are cached per tool id; a miss is not
- * cached, so it is retried once the tool becomes available.
- */
-function bobRunningLong(toolId: string): string[] | undefined {
-  const cached = runningLongCache.get(toolId);
-  if (cached) { return cached; }
-  for (const cm of getTaskManager()?._chatManagers ?? []) {
-    try {
-      const tool = cm.currentTask?.getTools?.().find((t: any) => t.id === toolId);
-      const runningLong = tool?.getLabels?.({})?.runningLong;
-      if (runningLong) {
-        runningLongCache.set(toolId, runningLong);
-        return runningLong;
-      }
-    } catch { /* non-fatal: labels fall back to none */ }
-  }
-  return undefined;
-}
-
-/** True when the workspace tools are usable; gates the source-level hooks below. */
-function workspaceToolsActive(): boolean {
-  return isMultiRoot() && isAreaEnabled('Workspace');
-}
-
 // ─── Tool classes ─────────────────────────────────────────────────────────────
 
 export class ListWorkspaceFoldersTool {
@@ -104,26 +42,24 @@ export class ListWorkspaceFoldersTool {
 
   getId() { return ListWorkspaceFoldersTool.id; }
 
-  /** Only expose this tool when there are multiple workspace roots and the workspace area is enabled. */
+  /** Only expose this tool when there are multiple workspace roots. */
   enabled(_env?: any): boolean {
-    return workspaceToolsActive();
+    return isMultiRoot();
   }
 
   getDescription(_env?: any): string {
     return (
       'List every root folder in the current VS Code workspace. ' +
       'Returns each folder\'s name and fsPath. ' +
-      'This workspace is a MULTI-ROOT workspace with folders at completely ' +
-      'different paths on disk (e.g. c:\\src\\frontend AND c:\\src\\backend). ' +
-      'Bob\'s built-in tools (read_file, list_files, glob, grep) only work for the ' +
-      'PRIMARY folder shown in environment_info - they will be blocked for all others. ' +
-      'ALWAYS call this first on any task that might touch more than one project. ' +
-      'Then pass the folder\'s "name" as the "workspace" parameter to any workspace-scoped tool.'
+      'This workspace is a MULTI-ROOT workspace: all tools work on files in every ' +
+      'folder, but relative paths resolve against the PRIMARY folder only. ' +
+      'Call this first on any task that might touch more than one project so you ' +
+      'know the folder names and their absolute paths.'
     );
   }
 
   getCostEffectiveDescription(): string {
-    return 'List all VS Code workspace folder roots - call first, then use folder name as "workspace" param';
+    return 'List all VS Code workspace folder roots - call first to discover folder names and paths';
   }
 
   private static readonly PARAMS: any[] = [];
@@ -161,1680 +97,379 @@ export class ListWorkspaceFoldersTool {
 
     context.pushResult(JSON.stringify({
       totalFolders: folders.length,
-      note: 'Pass the folder "name" as the "workspace" parameter to any workspace-scoped tool.',
+      note: 'Relative paths resolve against the first (primary) folder. For secondary folders use absolute paths, "../<name>/..." or "<name>/..." (resolved inside that folder when it does not exist under the primary root).',
       folders,
     }, null, 2));
   }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── Multi-root sandbox patch ─────────────────────────────────────────────────
+//
+// Root cause (Bob internals, extension.js): before every tool call, `sCr()`
+// builds the tool's parameter schema via `tool.getParameters(env)`, collects
+// the values of every parameter tagged `usage: "filePath"` and resolves each
+// against `env.workspace` — which is always the PRIMARY workspace root. Any
+// path under a secondary folder is flagged `isOutsideWorkspace: true`, which
+// then either hard-blocks the call ("Allow outside workspace tool requests"
+// off) or forces an approval prompt (unless the newer per-group
+// `enableOutsideWorkspace` / global `outsideWorkspaceAllowed` flags are on).
+//
+// Neither state is correct for a multi-root workspace: a secondary folder IS
+// part of the workspace the user opened. This patch makes Bob's own check
+// workspace-aware:
+//
+//   1. `Task.recordToolCallArguments(toolCall)` — called synchronously at the
+//      start of every tool call, BEFORE the sandbox computation — is wrapped
+//      to stash the call's arguments keyed by task id.
+//   2. The built-in file tools' `getParameters(env)` is wrapped so that, when
+//      every `filePath`-tagged argument resolves inside one of the workspace
+//      folders, the `usage: "filePath"` tag is dropped from the returned
+//      descriptors for that call. `sCr()` then sees no file paths, computes
+//      `isOutsideWorkspace: false`, and the call behaves exactly like a
+//      primary-folder path: no block, no prompt, flags irrelevant.
+//      Paths genuinely outside every folder keep their tags, so Bob's native
+//      behavior (block / prompt / auto-approve per the user's flags) is
+//      preserved for them.
+//   3. The same tools' `call()` is wrapped to rewrite `folderName/...`-style
+//      relative paths to absolute paths inside that folder (only when the
+//      path does not exist under the primary root and does exist inside the
+//      named folder), so the model can address secondary folders naturally.
+//      For the symbol tools (FindSymbol / FindReferencingSymbols) the
+//      forwarded context also gets `env.workspace` scoped to the resolved
+//      folder, because those tools hardwire the workspace root for the
+//      language-server query and their path parameters.
+//
+// All wraps are installed lazily from `source.onTurnStart` (the turn's task
+// and its tool instances exist by then, and the wraps are in place before the
+// turn's first tool call) and are generic: they read `this.id` at call time,
+// so one prototype wrap covers every past and future instance of a tool
+// class. Re-running on later turns catches tools exposed by modes that were
+// not active earlier.
+//
+// Caveats (accepted, documented in DEVELOPMENT.md):
+// - Mode `fileRegex` restrictions and the `isBobHomeWrite` flag are driven by
+//   the same `filePath`-tagged values. We never strip for paths inside
+//   `~/.bob`, so Bob's home-write protection is preserved; mode file-regex
+//   restrictions are skipped for secondary-folder paths while a strip is
+//   active (niche).
+// - Depends on Bob internals (`recordToolCallArguments` on the Task
+//   prototype, class-method `getParameters` on built-in tools, `env.id` being
+//   the task id). If the shapes change, the wraps are simply never installed
+//   and Bob falls back to its native single-root behavior.
 
-export class ReadWorkspaceFileTool {
-  static id = 'read_workspace_file';
-  groups = ['read'];
-  permission = 'read';
+/**
+ * Built-in tools whose calls carry `usage: "filePath"` parameters and are
+ * therefore subject to the outside-workspace check. Confirmed against
+ * extension.js: read_file / write_file / list_files / glob / grep /
+ * insert_content / search_and_replace / apply_diff tag `path`;
+ * execute_command tags `cwd`.
+ */
+const BUILTIN_FILE_TOOLS = new Set([
+  'read_file',
+  'write_file',
+  'list_files',
+  'glob',
+  'grep',
+  'insert_content',
+  'search_and_replace',
+  'apply_diff',
+  'execute_command',
+]);
 
-  getId() { return ReadWorkspaceFileTool.id; }
+/**
+ * Built-in symbol tools. Their path parameters are not `filePath`-tagged (no
+ * sandbox issue), but they resolve paths against `env.workspace` and scope
+ * the language-server query to it — so they need the `call()` rewrite plus
+ * the `env.workspace` scoping.
+ */
+const SYMBOL_TOOLS = new Set(['FindSymbol', 'FindReferencingSymbols']);
 
-  /** Only expose this tool when there are multiple workspace roots and the workspace area is enabled. */
-  enabled(_env?: any): boolean {
-    return workspaceToolsActive();
-  }
+/** Every built-in tool whose prototypes we wrap. */
+const SANDBOX_TOOLS = new Set([...BUILTIN_FILE_TOOLS, ...SYMBOL_TOOLS]);
 
-  getDescription(_env?: any): string {
-    return (
-      'Read the text content of any file in the VS Code workspace - including files in ' +
-      'secondary workspace folders that are OUTSIDE the primary workspace root. ' +
-      'MUST be used instead of read_file for any file not under the primary folder. ' +
-      'Call list_workspace_folders first to get the folder name, then pass it as "workspace".'
-    );
-  }
+/** Built-in tool id → parameter names that carry paths (for the relative-path rewrite). */
+const PATH_PARAMS_BY_TOOL: Record<string, readonly string[]> = {
+  read_file:          ['path'],
+  write_file:         ['path'],
+  list_files:         ['path'],
+  glob:               ['path'],
+  grep:               ['path'],
+  insert_content:     ['path'],
+  search_and_replace: ['path'],
+  apply_diff:         ['path'],
+  execute_command:    ['cwd'],
+  FindSymbol:               ['filter_path'],
+  FindReferencingSymbols:   ['relative_path'],
+};
 
-  getCostEffectiveDescription(): string {
-    return 'Read file from any workspace folder (use instead of read_file for non-primary folders)';
-  }
+// ─── State ────────────────────────────────────────────────────────────────────
 
-  private static readonly PARAMS = [
-    {
-      name: 'workspace',
-      type: 'string',
-      description: 'Workspace folder name as returned by list_workspace_folders (e.g. "backend").',
-      detail: 'Workspace folder name',
-      required: true,
-      usage: 'backend',
-    },
-    {
-      name: 'path',
-      type: 'string',
-      description: 'File path relative to the workspace folder root (e.g. "src/app.ts").',
-      detail: 'File path relative to workspace folder',
-      required: true,
-      usage: 'src/server.ts',
-    },
-    {
-      name: 'range',
-      type: 'string',
-      description: 'One or more line range elements in format "start-end" (1-based, inclusive)',
-      detail: 'Line range "start-end" (optional)',
-      required: false,
-      usage: '1-100',
-    },
-  ];
-
-  // Property - read by toolToOpenAi(e).parameters
-  parameters = paramsToSchema(ReadWorkspaceFileTool.PARAMS);
-
-  // Method - read by the newer getParameters(env) paths
-  getParameters(_env?: any): any[] { return ReadWorkspaceFileTool.PARAMS; }
-
-  getLabels(args: Record<string, any>) {
-    const p = ` ${labelPath(args.workspace, args.path)}`;
-    const r = args?.range ? ` (${args.range})` : '';
-    return {
-      displayName: `Read File${p}${r}`,
-      running: `Reading file${p}${r}`,
-      success: `Read file${p}${r}`,
-      error: `Failed to read file${p}${r}`,
-    };
-  }
-
-  async call(context: {
-    env: any;
-    parameters: { workspace: string; path: string; range?: string };
-    pushResult: (text: string) => void;
-    pushError: (text: string) => void;
-    [key: string]: any;
-  }): Promise<void> {
-    const { workspace, path: filePath, range } = context.parameters;
-
-    const resolved = resolveInFolder(workspace, '');
-    if ('error' in resolved) {
-      context.pushError(resolved.error);
-      return;
-    }
-
-    const readFileTool = getBobTool(context.env.id, 'read_file');
-    if (!readFileTool) {
-      context.pushError(
-        'read_workspace_file: read_file tool not found in current task.'
-      );
-      return;
-    }
-
-    await readFileTool.call({
-      ...context,
-      env: {
-        ...context.env,
-        workspace: resolved.uri.fsPath,
-      },
-      parameters: {
-        path: filePath,
-        ...(range !== undefined && { range }),
-      },
-      // Bob's read_file calls p.trackFileRead(uri, mtime) without optional chaining.
-      // We can't receive it from the task runner (it's a closure over K), but we can
-      // replicate the effect: setMetadata merges into the same K object, so writing
-      // into fileMtimes via setMetadata is functionally identical to trackFileRead.
-      trackFileRead: (uri: string, mtime: number) => {
-        context.setMetadata?.({ fileMtimes: { [uri]: mtime } });
-      },
-    });
-  }
+export interface PendingToolCall {
+  toolId: string;
+  args: Record<string, any>;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+/** taskId → arguments of the most recent tool call on that task. */
+const pendingToolArgs = new Map<string, PendingToolCall>();
 
-export class ListWorkspaceFilesTool {
-  static id = 'list_workspace_files';
-  groups = ['read'];
-  permission = 'read';
+/** Prototypes of built-in tool classes we have already wrapped. */
+// Prototypes are class-wide and live for the whole session, so a plain Set
+// (which exposes .size for the log line) is fine here.
+const patchedPrototypes = new Set<object>();
 
-  getId() { return ListWorkspaceFilesTool.id; }
+/** True once the one-time "applied" log line has been emitted. */
+let patchLogged = false;
 
-  /** Only expose this tool when there are multiple workspace roots and the workspace area is enabled. */
-  enabled(_env?: any): boolean {
-    return workspaceToolsActive();
-  }
-
-  getDescription(_env?: any): string {
-    return (
-      'List files and directories inside any folder in the VS Code workspace - including ' +
-      'secondary workspace folders OUTSIDE the primary workspace root. ' +
-      'MUST be used instead of list_files for any directory not under the primary folder. ' +
-      'Call list_workspace_folders first to get the folder name, then pass it as "workspace". ' +
-      'Use recursive:true to walk the full subtree (capped at 200 entries).'
-    );
-  }
-
-  getCostEffectiveDescription(): string {
-    return 'List files/dirs in any workspace folder (use instead of list_files for non-primary folders)';
-  }
-
-  private static readonly PARAMS = [
-    {
-      name: 'workspace',
-      type: 'string',
-      description: 'Workspace folder name as returned by list_workspace_folders (e.g. "backend").',
-      detail: 'Workspace folder name',
-      required: true,
-      usage: 'backend',
-    },
-    {
-      name: 'path',
-      type: 'string',
-      description: 'Directory path relative to the workspace folder root. Omit or pass "." to list the folder root itself.',
-      detail: 'Directory path relative to workspace folder (optional, defaults to root)',
-      required: false,
-      usage: 'src',
-    },
-    {
-      name: 'recursive',
-      type: 'boolean',
-      description: 'If true, list files recursively. Defaults to false (top-level only). Recursive listings are capped at 200 entries.',
-      detail: 'List recursively (default: false)',
-      required: false,
-      usage: 'false',
-    },
-  ];
-
-  // Property - read by toolToOpenAi(e).parameters
-  parameters = paramsToSchema(ListWorkspaceFilesTool.PARAMS);
-
-  // Method - read by the newer getParameters(env) paths
-  getParameters(_env?: any): any[] { return ListWorkspaceFilesTool.PARAMS; }
-
-  getLabels(args: Record<string, any>) {
-    const loc = labelPath(args.workspace, args.path);
-    const recursive = args?.recursive ? ' recursively' : '';
-    return {
-      displayName: `List Files in ${loc}`,
-      running: `Listing files in ${loc}${recursive}`,
-      success: `Listed files in ${loc}`,
-      error: `Failed to list files in ${loc}`,
-    };
-  }
-
-  async call(context: {
-    env: any;
-    parameters: { workspace: string; path?: string; recursive?: boolean };
-    pushResult: (text: string) => void;
-    pushError: (text: string) => void;
-  }): Promise<void> {
-    const { workspace, path: dirPath = '.', recursive = false } = context.parameters;
-
-    const resolved = resolveInFolder(workspace, '');
-    if ('error' in resolved) {
-      context.pushError(JSON.stringify({ error: resolved.error }));
-      return;
-    }
-
-    const listFilesTool = getBobTool(context.env.id, 'list_files');
-    if (!listFilesTool) {
-      context.pushError(
-        'list_workspace_files: list_files tool not found in current task.'
-      );
-      return;
-    }
-
-    const wsRoot = resolved.uri.fsPath;
-    const fullPath = normaliseWorkspacePath(dirPath)
-      ? vscode.Uri.joinPath(resolved.uri, normaliseWorkspacePath(dirPath)).fsPath
-      : wsRoot;
-    const candidates = [dirPath, fullPath];
-
-    // First attempt: call list_files with the relative path against wsRoot.
-    // In newer versions of Bob, when inspecting subdirectories in secondary workspace
-    // folders, list_files may enforce/expect an absolute path and call pushError.
-    // If that happens, we catch the failure and retry using the fully resolved absolute path.
-    for (let i = 0; i < candidates.length; i++) {
-      const targetPath = candidates[i];
-      const isLast = i === candidates.length - 1;
-      let succeeded = false;
-      await listFilesTool.call({
-        ...context,
-        env: { ...context.env, workspace: wsRoot },
-        parameters: { path: targetPath, recursive },
-        pushResult: (text: string) => {
-          succeeded = true;
-          context.pushResult(absolutiseToolContent(text, 'glob', wsRoot));
-        },
-        pushError: (text: string) => {
-          if (isLast) {
-            context.pushError(text);
-          }
-        },
-      });
-      if (succeeded) {
-        break;
-      }
-    }
-  }
+/** Stashed arguments of the most recent tool call on a task, if any. */
+export function getPendingToolArgs(taskId: unknown): PendingToolCall | undefined {
+  return typeof taskId === 'string' ? pendingToolArgs.get(taskId) : undefined;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-
-export class GlobWorkspaceTool {
-  static id = 'glob_workspace';
-  groups = ['read'];
-  permission = 'read';
-
-  getId() { return GlobWorkspaceTool.id; }
-
-  /** Only expose this tool when there are multiple workspace roots and the workspace area is enabled. */
-  enabled(_env?: any): boolean {
-    return workspaceToolsActive();
-  }
-
-  getDescription(_env?: any): string {
-    return (
-      'Find files by name pattern (glob) inside any folder in the VS Code workspace - ' +
-      'including secondary workspace folders OUTSIDE the primary workspace root. ' +
-      'MUST be used instead of glob for any directory not under the primary folder. ' +
-      'Supports * (any chars within a path segment), ** (any path depth), and ? (single char). ' +
-      'Examples: "**/*.ts", "src/**/*.test.ts", "*.json". ' +
-      'Pass a workspace folder name to scope the search to one folder, or omit to search all. ' +
-      'Results are capped at 100 matches per workspace folder.'
-    );
-  }
-
-  getCostEffectiveDescription(): string {
-    return 'Find files by glob pattern in any workspace folder (use instead of glob for non-primary folders)';
-  }
-
-  private static readonly PARAMS = [
-    {
-      name: 'pattern',
-      type: 'string',
-      detail: 'Glob pattern to match files (e.g. "**/*.ts", "src/**/index.ts").',
-      required: true,
-      usage: '**/*.ts',
-    },
-    {
-      name: 'workspace',
-      type: 'string',
-      detail: 'Workspace folder name (from list_workspace_folders). Omit to search all folders.',
-      required: false,
-      usage: 'backend',
-    },
-    {
-      name: 'path',
-      type: 'string',
-      detail: 'Directory to search in (relative to the workspace folder root). Defaults to workspace root.',
-      required: false,
-      usage: 'src',
-    },
-  ];
-
-  // Property - read by toolToOpenAi(e).parameters
-  parameters = paramsToSchema(GlobWorkspaceTool.PARAMS);
-
-  // Method - read by the newer getParameters(env) paths
-  getParameters(_env?: any): any[] { return GlobWorkspaceTool.PARAMS; }
-
-  getLabels(args: Record<string, any>) {
-    const pat = typeof args?.pattern === 'string' && args.pattern.trim() ? ` with pattern "${args.pattern}"` : '';
-    const loc = ` in ${labelPath(args.workspace, args.path)}`;
-    return {
-      displayName: `Find Files${loc}${pat}`,
-      running: `Finding files${loc}${pat}`,
-      success: `Found files${loc}${pat}`,
-      error: `Failed to find files${loc}${pat}`,
-    };
-  }
-
-  async call(context: {
-    env: any;
-    parameters: { pattern: string; workspace?: string; path?: string };
-    pushResult: (text: string) => void;
-    pushError: (text: string) => void;
-  }): Promise<void> {
-    const { pattern, workspace, path: subPath } = context.parameters;
-
-    if (!pattern?.trim()) {
-      context.pushError('pattern is required');
-      return;
-    }
-
-    const globTool = getBobTool(context.env.id, 'glob');
-    if (!globTool) {
-      context.pushError('glob_workspace: glob tool not found in current task.');
-      return;
-    }
-
-    // Determine which workspace roots to search
-    const folders = vscode.workspace.workspaceFolders ?? [];
-    if (folders.length === 0) {
-      context.pushError(JSON.stringify({ error: 'No workspace folders are open.' }));
-      return;
-    }
-
-    let roots: Array<vscode.WorkspaceFolder>;
-    if (workspace) {
-      const resolved = resolveInFolder(workspace, '');
-      if ('error' in resolved) {
-        context.pushError(JSON.stringify({ error: resolved.error }));
-        return;
-      }
-      // Find the matching folder object so we can use its fsPath as workspace root
-      const folder = folders.find(f => f.name === workspace);
-      if (!folder) {
-        context.pushError(JSON.stringify({ error: `Workspace folder "${workspace}" not found.` }));
-        return;
-      }
-      roots = [folder];
-    } else {
-      roots = [...folders];
-    }
-
-    // Call glob once per root, collecting all output chunks
-    const chunks: string[] = [];
-    for (const folder of roots) {
-      let hasResult = false;
-      const collected: string[] = [];
-      await globTool.call({
-        ...context,
-        env: {
-          ...context.env,
-          workspace: folder.uri.fsPath,
-        },
-        parameters: {
-          pattern,
-          // When a sub-path is given, pass it so Bob scopes the search to that directory
-          ...(subPath ? { path: subPath } : {}),
-        },
-        pushResult: (text: string) => {
-          hasResult = true;
-          collected.push(absolutiseToolContent(text, 'glob', folder.uri.fsPath));
-        },
-        pushError:  (text: string) => context.pushError(text),
-      });
-      // Only include results from folders that actually matched — Bob pushes a
-      // "No files found" placeholder via pushResult on no-match, which we must
-      // suppress when aggregating across all folders. Tracking hasResult this way
-      // is immune to Bob changing the placeholder string.
-      if (hasResult) {
-        chunks.push(...collected);
-      }
-    }
-
-    if (chunks.length === 0) {
-      context.pushResult('No files found');
-      return;
-    }
-    context.pushResult(chunks.join('\n'));
-  }
+function getFolders(): readonly vscode.WorkspaceFolder[] {
+  return vscode.workspace.workspaceFolders ?? [];
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── Pure decision logic (exported for tests) ─────────────────────────────────
 
-export class GrepWorkspaceTool {
-  static id = 'grep_workspace';
-  groups = ['read'];
-  permission = 'read';
+/** True when `p` is `dir` itself or inside `dir` (case-insensitive on Windows). */
+export function isInsideDir(p: string, dir: string): boolean {
+  const norm = (x: string) => (process.platform === 'win32' ? path.resolve(x).toLowerCase() : path.resolve(x));
+  const a = norm(p);
+  const b = norm(dir);
+  const bPrefix = b.endsWith(path.sep) ? b : b + path.sep;
+  return a === b || a.startsWith(bPrefix);
+}
 
-  getId() { return GrepWorkspaceTool.id; }
+/** True when `p` is inside Bob's own home directory (`~/.bob`). */
+function isInsideBobHome(p: string): boolean {
+  return isInsideDir(p, path.join(os.homedir(), '.bob'));
+}
 
-  /** Only expose this tool when there are multiple workspace roots and the workspace area is enabled. */
-  enabled(_env?: any): boolean {
-    return workspaceToolsActive();
+/**
+ * Resolve a path the way Bob's `vs()` does: expand a leading `~` to the user's
+ * home directory, then resolve against the workspace root (absolute paths win).
+ */
+export function resolveLikeBob(workspaceRoot: string | undefined, value: string): string {
+  const expanded = value.startsWith('~/') || value === '~'
+    ? value.replace(/^~/, os.homedir())
+    : value;
+  return path.resolve(workspaceRoot ?? process.cwd(), expanded);
+}
+
+/**
+ * Decide whether the `usage: "filePath"` tags should be stripped from a
+ * parameter list for the call described by `args`.
+ *
+ * Returns true only when every provided `filePath` value resolves inside one
+ * of the workspace folders (and none inside `~/.bob`, where Bob's own
+ * home-write protection must stay intact). Any genuinely outside path makes
+ * the call keep its tags so Bob's native flags/prompts apply unchanged.
+ */
+export function shouldStripFilePathUsage(
+  params: readonly any[],
+  args: Record<string, any> | undefined,
+  env: any,
+  folders: readonly { name: string; uri: { fsPath: string } }[],
+): boolean {
+  const filePathParams = params.filter(p => p?.usage === 'filePath');
+  if (filePathParams.length === 0) { return false; }
+
+  const workspaceRoot: string | undefined = env?.workspace;
+  let anyValue = false;
+  for (const p of filePathParams) {
+    const raw = args?.[p.name];
+    if (typeof raw !== 'string' || raw.trim() === '') { continue; }  // absent → Bob ignores it too
+    anyValue = true;
+    const abs = resolveLikeBob(workspaceRoot, raw);
+    if (isInsideBobHome(abs)) { return false; }
+    if (!folders.some(f => isInsideDir(abs, f.uri.fsPath))) { return false; }
   }
+  return anyValue;
+}
 
-  getDescription(_env?: any): string {
-    return (
-      'Search for a text pattern (regex or literal) inside files in the VS Code workspace - ' +
-      'including secondary workspace folders OUTSIDE the primary workspace root. ' +
-      'MUST be used instead of grep for any directory not under the primary folder. ' +
-      'Returns matching lines with file path and line number, grouped by file. ' +
-      'Pass a workspace folder name to scope the search to one folder, or omit to search all. ' +
-      'Results are capped at 100 matching lines per workspace folder.'
-    );
+/**
+ * Rewrite a relative path whose first segment is a secondary folder name
+ * (e.g. `"backend/src/app.ts"`) to an absolute path inside that folder.
+ *
+ * Conservative by design: only fires when the path resolves nowhere under the
+ * workspace root the tool would natively use AND the rewritten path exists on
+ * disk. Everything else (absolute paths, `../`-escapes, `~`, plain
+ * primary-relative paths) is returned unchanged.
+ *
+ * @param value        Raw parameter value.
+ * @param workspaceRoot Root the tool natively resolves against (env.workspace).
+ * @param folders      Secondary workspace folders eligible for name matching.
+ */
+export function rewriteSecondaryRelativePath(
+  value: string,
+  workspaceRoot: string | undefined,
+  folders: readonly { name: string; uri: { fsPath: string } }[],
+): string {
+  if (typeof value !== 'string' || value === '' || path.isAbsolute(value)) { return value; }
+  const norm = normaliseWorkspacePath(value);
+  if (!norm || norm.startsWith('../')) { return value; }  // ../ escapes resolve natively
+
+  const firstSeg = norm.split('/')[0];
+  const folder = folders.find(f => f.name === firstSeg);
+  if (!folder) { return value; }
+
+  const native = path.join(workspaceRoot ?? process.cwd(), norm);
+  if (existsSync(native)) { return value; }  // resolves fine natively — don't touch
+
+  const rest = norm.slice(firstSeg.length).replace(/^[/\\]/, '');
+  const candidate = rest ? path.join(folder.uri.fsPath, rest) : folder.uri.fsPath;
+  return existsSync(candidate) ? candidate : value;
+}
+
+// ─── Patch installation ───────────────────────────────────────────────────────
+
+/**
+ * Patch `obj[name]` wherever it is defined (own property or anywhere on the
+ * prototype chain) with `makeWrapper(original)`. Idempotent: wrappers are
+ * tagged and skipped on re-install. Returns true when a (new) wrap was
+ * installed or one was already present.
+ */
+function patchMethod(obj: any, name: string, makeWrapper: (original: any) => any): boolean {
+  let owner: any = obj;
+  while (owner && !Object.prototype.hasOwnProperty.call(owner, name)) {
+    owner = Object.getPrototypeOf(owner);
   }
+  if (!owner || typeof owner[name] !== 'function') { return false; }
+  if ((owner[name] as any).__bobPtSandboxPatch) { return true; }
 
-  getCostEffectiveDescription(): string {
-    return 'Search file contents by regex in any workspace folder (use instead of grep for non-primary folders)';
-  }
+  const wrapper = makeWrapper(owner[name]);
+  (wrapper as any).__bobPtSandboxPatch = true;
+  owner[name] = wrapper;
+  return true;
+}
 
-  private static readonly PARAMS = [
-    {
-      name: 'pattern',
-      type: 'string',
-      detail: 'Regex pattern to search for in file contents (uses Rust regex syntax).',
-      required: true,
-      usage: 'function handleClick',
-    },
-    {
-      name: 'workspace',
-      type: 'string',
-      detail: 'Workspace folder name (from list_workspace_folders). Omit to search all folders.',
-      required: false,
-      usage: 'backend',
-    },
-    {
-      name: 'path',
-      type: 'string',
-      detail: 'File or directory path to search in, relative to the workspace folder root. Accepts single path only. Defaults to workspace root.',
-      required: false,
-      usage: 'src',
-    },
-    {
-      name: 'include',
-      type: 'string',
-      detail: 'Glob pattern to filter files (e.g. "*.ts", "*.{ts,tsx}").',
-      required: false,
-      usage: '**/*.ts',
-    },
-    {
-      name: 'ignore_case',
-      type: 'boolean',
-      detail: 'Case-insensitive matching (-i).',
-      required: false,
-      usage: 'false',
-    },
-    {
-      name: 'invert_match',
-      type: 'boolean',
-      detail: 'Return lines that do NOT match the pattern (-v).',
-      required: false,
-      usage: 'false',
-    },
-    {
-      name: 'word_regexp',
-      type: 'boolean',
-      detail: 'Only match whole words - pattern must be surrounded by word boundaries (-w).',
-      required: false,
-      usage: 'false',
-    },
-    {
-      name: 'files_with_matches',
-      type: 'boolean',
-      detail: 'Return only file paths instead of individual matching lines (-l). Useful for checking which files contain a pattern.',
-      required: false,
-      usage: 'false',
-    },
-  ];
+/**
+ * Install the multi-root sandbox wraps.
+ *
+ * Registered as a `source.onTurnStart` callback: the turn's task and its tool
+ * instances exist by then, and the wraps are in place before the turn's first
+ * tool call. Prototypes are shared by class, so each class only needs to be
+ * wrapped once; re-running on later turns catches tools exposed by modes that
+ * were not active earlier.
+ */
+export function installMultiRootSandboxPatch(source: any): void {
+  source.onTurnStart((taskId: string) => {
+    // Fresh turn — arguments stashed during previous turns are stale.
+    pendingToolArgs.clear();
+    if (!isMultiRoot()) { return; }
 
-  // Property - read by toolToOpenAi(e).parameters
-  parameters = paramsToSchema(GrepWorkspaceTool.PARAMS);
-
-  // Method - read by the newer getParameters(env) paths
-  getParameters(_env?: any): any[] { return GrepWorkspaceTool.PARAMS; }
-
-  getLabels(args: Record<string, any>) {
-    const pat = typeof args?.pattern === 'string' && args.pattern.trim() ? ` for "${args.pattern}"` : '';
-    const loc = ` in ${labelPath(args.workspace, args.path)}`;
-    return {
-      displayName: `Search Files${loc}${pat}`,
-      running: `Searching files${loc}${pat}`,
-      success: `Searched files${loc}${pat}`,
-      error: `Failed to search files${loc}${pat}`,
-    };
-  }
-
-  async call(context: {
-    env: any;
-    parameters: {
-      pattern: string;
-      workspace?: string;
-      path?: string;
-      include?: string;
-      ignore_case?: boolean;
-      invert_match?: boolean;
-      word_regexp?: boolean;
-      files_with_matches?: boolean;
-    };
-    pushResult: (text: string) => void;
-    pushError: (text: string) => void;
-  }): Promise<void> {
-    const { pattern, workspace, path: subPath, include,
-            ignore_case, invert_match, word_regexp, files_with_matches } = context.parameters;
-
-    const grepTool = getBobTool(context.env.id, 'grep');
-    if (!grepTool) {
-      context.pushError('grep_workspace: grep tool not found in current task.');
-      return;
+    try {
+      const tm = getTaskManager();
+      const cm = tm ? findTaskChatManager(tm, taskId) : null;
+      const task = cm?.currentTask;
+      if (task) { patchForTask(task); }
+    } catch (e) {
+      logger.warn('multi-root sandbox patch: refresh failed', e);
     }
+  });
+}
 
-    // Determine which workspace roots to search
-    const folders = vscode.workspace.workspaceFolders ?? [];
-    if (folders.length === 0) {
-      context.pushError(JSON.stringify({ error: 'No workspace folders are open.' }));
-      return;
-    }
-
-    let roots: Array<vscode.WorkspaceFolder>;
-    if (workspace) {
-      const resolved = resolveInFolder(workspace, '');
-      if ('error' in resolved) {
-        context.pushError(JSON.stringify({ error: resolved.error }));
-        return;
-      }
-      const folder = folders.find(f => f.name === workspace);
-      if (!folder) {
-        context.pushError(JSON.stringify({ error: `Workspace folder "${workspace}" not found.` }));
-        return;
-      }
-      roots = [folder];
-    } else {
-      roots = [...folders];
-    }
-
-    // Call grep once per root, collecting all output chunks
-    const chunks: string[] = [];
-    for (const folder of roots) {
-      const collected: string[] = [];
-      const fullPath = subPath && normaliseWorkspacePath(subPath)
-        ? vscode.Uri.joinPath(folder.uri, normaliseWorkspacePath(subPath)).fsPath
-        : undefined;
-      const pathCandidates = subPath ? [subPath, ...(fullPath ? [fullPath] : [])] : [undefined];
-
-      // First attempt: call grep with the relative path against folder.uri.fsPath.
-      // In newer versions of Bob, when searching subdirectories in secondary workspace
-      // folders, grep may enforce/expect an absolute path and call pushError.
-      // If that happens, we catch the failure and retry using the fully resolved absolute path.
-      let folderMatched = false;
-      for (let i = 0; i < pathCandidates.length; i++) {
-        const targetPath = pathCandidates[i];
-        const isLast = i === pathCandidates.length - 1;
-        let succeeded = false;
-        await grepTool.call({
-          ...context,
-          env: {
-            ...context.env,
-            workspace: folder.uri.fsPath,
-          },
-          parameters: {
-            pattern,
-            ...(targetPath    !== undefined && { path: targetPath }),
-            ...(include       !== undefined && { include }),
-            ...(ignore_case   !== undefined && { ignore_case }),
-            ...(invert_match  !== undefined && { invert_match }),
-            ...(word_regexp   !== undefined && { word_regexp }),
-            ...(files_with_matches !== undefined && { files_with_matches }),
-          },
-          pushResult: (text: string) => {
-            succeeded = true;
-            collected.push(absolutiseToolContent(text, 'grep', folder.uri.fsPath));
-          },
-          pushError: (text: string) => {
-            if (isLast) {
-              context.pushError(text);
-            }
-          },
-        });
-        if (succeeded) {
-          folderMatched = true;
-          break;
+/** Wrap `recordToolCallArguments` + the sandboxed built-in tools of one task. */
+function patchForTask(task: any): void {
+  // 1. Stash tool-call arguments before Bob's sandbox computation reads them.
+  patchMethod(task, 'recordToolCallArguments', (original: any) =>
+    function (this: any, toolCall: any) {
+      try {
+        if (toolCall?.name && toolCall?.arguments && typeof toolCall.arguments === 'object') {
+          pendingToolArgs.set(this?.id, { toolId: toolCall.name, args: toolCall.arguments });
         }
-      }
-
-      // Only include results from folders where pushResult actually fired.
-      // Bob pushes a no-results placeholder via pushResult on no-match, which
-      // we must suppress when aggregating across all folders. Tracking the flag
-      // this way is immune to Bob changing the placeholder string.
-      if (folderMatched) {
-        chunks.push(...collected);
-      }
-    }
-
-    if (chunks.length === 0) {
-      context.pushResult('No files found');
-      return;
-    }
-    context.pushResult(chunks.join('\n'));
-  }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-
-export class WriteWorkspaceFileTool {
-  static id = 'write_workspace_file';
-  groups = ['edit'];
-  permission = 'edit';
-
-  getId() { return WriteWorkspaceFileTool.id; }
-
-  /** Only expose this tool when there are multiple workspace roots and the workspace area is enabled. */
-  enabled(_env?: any): boolean {
-    return workspaceToolsActive();
-  }
-
-  getDescription(_env?: any): string {
-    return (
-      'Write (create or overwrite) a file in any folder in the VS Code workspace - ' +
-      'including secondary workspace folders OUTSIDE the primary workspace root. ' +
-      'MUST be used instead of write_file for any file not under the primary folder. ' +
-      'If the file does not exist it is created; if it exists it is fully overwritten. ' +
-      'Parent directories are created automatically. ' +
-      'Call list_workspace_folders first to get the folder name, then pass it as "workspace". ' +
-      'Always provide the COMPLETE intended content - this tool performs a full overwrite.'
-    );
-  }
-
-  getCostEffectiveDescription(): string {
-    return 'Write/create file in any workspace folder (use instead of write_file for non-primary folders)';
-  }
-
-  private static readonly PARAMS = [
-    {
-      name: 'workspace',
-      type: 'string',
-      description: 'Workspace folder name as returned by list_workspace_folders (e.g. "backend").',
-      detail: 'Workspace folder name',
-      required: true,
-      usage: 'backend',
-      renderHint: 'hidden',
-    },
-    {
-      name: 'path',
-      type: 'string',
-      description: 'File path relative to the workspace folder root (e.g. "src/app.ts").',
-      detail: 'File path relative to workspace folder',
-      required: true,
-      usage: 'src/server.ts',
-      renderHint: 'hidden',
-    },
-    {
-      name: 'content',
-      type: 'string',
-      description:
-        'The COMPLETE content to write to the file. ' +
-        'Always provide the full intended file content - do not truncate or omit any part. ' +
-        'Do not include line numbers in the content.',
-      detail: 'Full file content to write',
-      required: true,
-      renderHint: 'code',
-    },
-    {
-      name: 'line_count',
-      type: 'number',
-      description: 'The number of lines you intend to write. Compute this before generating the content parameter. Used to detect truncation on large files (100+ lines).',
-      detail: 'Expected line count (optional, helps detect truncation)',
-      required: false,
-      renderHint: 'text',
-    },
-  ];
-
-  // Property - read by toolToOpenAi(e).parameters
-  parameters = paramsToSchema(WriteWorkspaceFileTool.PARAMS);
-
-  // Method - read by the newer getParameters(env) paths
-  getParameters(_env?: any): any[] { return WriteWorkspaceFileTool.PARAMS; }
-
-  getLabels(args: Record<string, any>) {
-    const p = ` ${labelPath(args.workspace, args.path)}`;
-    return {
-      displayName: `Write File${p}`,
-      running: `Writing file${p}`,
-      success: `Wrote file${p}`,
-      error: `Failed to write file${p}`,
-      runningLong: bobRunningLong('write_file'),
-    };
-  }
-
-  async call(context: {
-    env: any;
-    parameters: { workspace: string; path: string; content: string; line_count?: number };
-    pushResult: (text: string) => void;
-    pushError: (text: string) => void;
-    setMetadata?: (meta: Record<string, any>) => void;
-    [key: string]: any;
-  }): Promise<void> {
-    const { workspace, path: filePath, content, line_count } = context.parameters;
-
-    const resolved = resolveInFolder(workspace, '');
-    if ('error' in resolved) {
-      context.pushError(JSON.stringify({ error: resolved.error }));
-      return;
-    }
-
-    const writeFileTool = getBobTool(context.env.id, 'write_file');
-    if (!writeFileTool) {
-      context.pushError('write_workspace_file: write_file tool not found in current task.');
-      return;
-    }
-
-    await writeFileTool.call({
-      ...context,
-      env: {
-        ...context.env,
-        workspace: resolved.uri.fsPath,
-      },
-      parameters: {
-        path: filePath,
-        content,
-        ...(line_count !== undefined && { line_count }),
-      },
-      // Bob's write_file calls f.pushEdit(uri, { before, after, mtime }) unconditionally.
-      // Bridge it to setMetadata so the undo entry (K.changes) and mtime (K.fileMtimes)
-      // are recorded in Bob's task metadata — identical to what Bob's own task runner does.
-      pushEdit: (uri: string, edit: { before: string; after: string; mtime?: number }) => {
-        context.setMetadata?.({
-          changes: { [uri]: { before: edit.before, after: edit.after, patch: createPatch(uri, edit.before, edit.after) } },
-          ...(edit.mtime !== undefined && { fileMtimes: { [uri]: edit.mtime } }),
-        });
-      },
+      } catch { /* non-fatal: worst case Bob applies its native check */ }
+      return original.call(this, toolCall);
     });
+
+  // 2 + 3. Wrap the built-in file tools' getParameters (usage strip) and every
+  //    sandboxed tool's call (relative-path rewrite; env scoping for symbol
+  //    tools). Wrappers are generic — they resolve `this.id` at call time, so
+  //    one prototype wrap covers every instance.
+  for (const tool of task.getTools?.() ?? []) {
+    if (tool && SANDBOX_TOOLS.has(tool.id)) { patchTool(tool); }
   }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-
-export class InsertWorkspaceContentTool {
-  static id = 'insert_workspace_content';
-  groups = ['edit'];
-  permission = 'edit';
-
-  getId() { return InsertWorkspaceContentTool.id; }
-
-  enabled(_env?: any): boolean { return workspaceToolsActive(); }
-
-  getDescription(_env?: any): string {
-    return (
-      'Add new lines of content into a file in any VS Code workspace folder without modifying ' +
-      'existing content. Specify the line number to insert before, or use line 0 to append to ' +
-      'the end. MUST be used instead of insert_content for files outside the primary folder. ' +
-      'Ideal for adding imports, functions, configuration blocks, or any multi-line text block.'
-    );
+function patchTool(tool: any): void {
+  const proto = Object.getPrototypeOf(tool);
+  if (proto) {
+    if (patchedPrototypes.has(proto)) { return; }
+    patchedPrototypes.add(proto);
   }
 
-  getCostEffectiveDescription(): string {
-    return 'Insert lines into a file in any workspace folder without overwriting (use instead of insert_content for non-primary folders)';
-  }
-
-  private static readonly PARAMS = [
-    {
-      name: 'workspace',
-      type: 'string',
-      detail: 'Workspace folder name as returned by list_workspace_folders (e.g. "backend").',
-      required: true,
-      usage: 'backend',
-      renderHint: 'hidden',
-    },
-    {
-      name: 'path',
-      type: 'string',
-      detail: 'File path relative to the workspace folder root (e.g. "src/app.ts").',
-      required: true,
-      usage: 'src/server.ts',
-      renderHint: 'hidden',
-    },
-    {
-      name: 'line',
-      type: 'number',
-      detail: 'Line number where content will be inserted (1-based). Use 0 to append at end of file. Use any positive number to insert before that line.',
-      required: true,
-      renderHint: 'text',
-    },
-    {
-      name: 'content',
-      type: 'string',
-      detail: 'The content to insert at the specified line.',
-      required: true,
-      renderHint: 'code',
-    },
-  ];
-
-  // Property - read by toolToOpenAi(e).parameters
-  parameters = paramsToSchema(InsertWorkspaceContentTool.PARAMS);
-
-  // Method - read by the newer getParameters(env) paths
-  getParameters(_env?: any): any[] { return InsertWorkspaceContentTool.PARAMS; }
-
-  getLabels(args: Record<string, any>) {
-    const loc = ` into ${labelPath(args.workspace, args.path)}`;
-    return {
-      displayName: `Insert Content${loc}`,
-      running: `Inserting content${loc}`,
-      success: `Inserted content${loc}`,
-      error: `Failed to insert content${loc}`,
-    };
-  }
-
-  async call(context: {
-    env: any;
-    parameters: { workspace: string; path: string; line: number; content: string };
-    pushResult: (text: string) => void;
-    pushError: (text: string) => void;
-    setMetadata?: (meta: Record<string, any>) => void;
-    [key: string]: any;
-  }): Promise<void> {
-    const { workspace, path: filePath, line, content } = context.parameters;
-
-    const resolved = resolveInFolder(workspace, '');
-    if ('error' in resolved) {
-      context.pushError(JSON.stringify({ error: resolved.error }));
-      return;
-    }
-
-    const insertContentTool = getBobTool(context.env.id, 'insert_content');
-    if (!insertContentTool) {
-      context.pushError('insert_workspace_content: insert_content tool not found in current task.');
-      return;
-    }
-
-    await insertContentTool.call({
-      ...context,
-      env: {
-        ...context.env,
-        workspace: resolved.uri.fsPath,
-      },
-      parameters: { path: filePath, line, content },
-      pushEdit: (uri: string, edit: { before: string; after: string; mtime?: number }) => {
-        context.setMetadata?.({
-          changes: { [uri]: { before: edit.before, after: edit.after, patch: createPatch(uri, edit.before, edit.after) } },
-          ...(edit.mtime !== undefined && { fileMtimes: { [uri]: edit.mtime } }),
-        });
-      },
+  patchMethod(tool, 'getParameters', (original: any) =>
+    function (this: any, env?: any) {
+      const params = original.call(this, env);
+      if (!isMultiRoot() || !Array.isArray(params)) { return params; }
+      const pending = getPendingToolArgs(env?.id);
+      if (!pending || pending.toolId !== (this.id ?? this.getId?.())) { return params; }
+      if (!shouldStripFilePathUsage(params, pending.args, env, getFolders())) { return params; }
+      return params.map(p => p?.usage === 'filePath' ? { ...p, usage: undefined } : p);
     });
-  }
-}
 
-// ─────────────────────────────────────────────────────────────────────────────
-
-export class SearchAndReplaceWorkspaceTool {
-  static id = 'search_and_replace_workspace';
-  groups = ['edit'];
-  permission = 'edit';
-
-  getId() { return SearchAndReplaceWorkspaceTool.id; }
-
-  enabled(_env?: any): boolean { return workspaceToolsActive(); }
-
-  getDescription(_env?: any): string {
-    return (
-      'Find and replace specific text strings or patterns (using regex) within a file in any ' +
-      'VS Code workspace folder. Supports literal text and regex patterns, case sensitivity ' +
-      'options, and optional line ranges. MUST be used instead of search_and_replace for files ' +
-      'outside the primary folder.\n\n' +
-      'Notes:\n' +
-      '- When use_regex is true, the search parameter is treated as a regular expression pattern\n' +
-      '- When ignore_case is true, the search is case-insensitive regardless of regex mode'
-    );
-  }
-
-  getCostEffectiveDescription(): string {
-    return 'Find and replace text in a file in any workspace folder (use instead of search_and_replace for non-primary folders)';
-  }
-
-  private static readonly PARAMS = [
-    {
-      name: 'workspace',
-      type: 'string',
-      detail: 'Workspace folder name as returned by list_workspace_folders (e.g. "backend").',
-      required: true,
-      usage: 'backend',
-      renderHint: 'hidden',
-    },
-    {
-      name: 'path',
-      type: 'string',
-      detail: 'File path relative to the workspace folder root.',
-      required: true,
-      usage: 'src/server.ts',
-      renderHint: 'hidden',
-    },
-    {
-      name: 'search',
-      type: 'string',
-      detail: 'The text or pattern to search for.',
-      required: true,
-    },
-    {
-      name: 'replace',
-      type: 'string',
-      detail: 'The text to replace matches with.',
-      required: true,
-    },
-    {
-      name: 'start_line',
-      type: 'number',
-      detail: 'Starting line number for restricted replacement (1-based).',
-      required: false,
-    },
-    {
-      name: 'end_line',
-      type: 'number',
-      detail: 'Ending line number for restricted replacement (1-based).',
-      required: false,
-    },
-    {
-      name: 'use_regex',
-      type: 'string',
-      detail: 'Set to "true" to treat search as a regex pattern (default: false).',
-      required: false,
-    },
-    {
-      name: 'ignore_case',
-      type: 'string',
-      detail: 'Set to "true" to ignore case when matching (default: false).',
-      required: false,
-    },
-  ];
-
-  // Property - read by toolToOpenAi(e).parameters
-  parameters = paramsToSchema(SearchAndReplaceWorkspaceTool.PARAMS);
-
-  // Method - read by the newer getParameters(env) paths
-  getParameters(_env?: any): any[] { return SearchAndReplaceWorkspaceTool.PARAMS; }
-
-  getLabels(args: Record<string, any>) {
-    const loc = ` in ${labelPath(args.workspace, args.path)}`;
-    return {
-      displayName: `Search & Replace${loc}`,
-      running: `Searching and replacing${loc}`,
-      success: `Completed search and replace${loc}`,
-      error: `Failed to search and replace${loc}`,
-    };
+  const pathParams = PATH_PARAMS_BY_TOOL[tool.id];
+  if (pathParams) {
+    patchMethod(tool, 'call', (original: any) =>
+      async function (this: any, context: any) {
+        if (isMultiRoot() && context?.parameters && typeof context.env?.workspace === 'string') {
+          const folders = getFolders();
+          // Only native built-in calls resolve against the primary root — our
+          // own delegation calls run with env.workspace patched to the target
+          // folder and must not be rewritten. Compare case-insensitively on
+          // Windows (isInsideDir both ways = path equality).
+          const primaryFsPath = folders[0].uri.fsPath;
+          const ws = context.env.workspace;
+          const isPrimaryRoot = isInsideDir(ws, primaryFsPath) && isInsideDir(primaryFsPath, ws);
+          if (folders.length > 1 && isPrimaryRoot) {
+            const rewritten: Record<string, any> = { ...context.parameters };
+            let changed = false;
+            for (const name of pathParams) {
+              const raw = rewritten[name];
+              if (typeof raw !== 'string') { continue; }
+              const fixed = rewriteSecondaryRelativePath(raw, ws, folders.slice(1));
+              if (fixed !== raw) { rewritten[name] = fixed; changed = true; }
+            }
+            if (changed) {
+              const forwarded = { ...context, parameters: rewritten };
+              if (SYMBOL_TOOLS.has(this.id)) {
+                // Bob's symbol tools hardwire env.workspace for the language-
+                // server query and path resolution — scope it to the folder
+                // containing the resolved path.
+                const resolved = pathParams
+                  .map(n => rewritten[n])
+                  .find(v => typeof v === 'string' && path.isAbsolute(v));
+                const folder = resolved
+                  ? folders.slice(1).find(f => isInsideDir(resolved, f.uri.fsPath))
+                  : undefined;
+                if (folder) { forwarded.env = { ...context.env, workspace: folder.uri.fsPath }; }
+              }
+              return original.call(this, forwarded);
+            }
+          }
+        }
+        return original.call(this, context);
+      });
   }
 
-  async call(context: {
-    env: any;
-    parameters: {
-      workspace: string;
-      path: string;
-      search: string;
-      replace: string;
-      start_line?: number;
-      end_line?: number;
-      use_regex?: string;
-      ignore_case?: string;
-    };
-    pushResult: (text: string) => void;
-    pushError: (text: string) => void;
-    setMetadata?: (meta: Record<string, any>) => void;
-    [key: string]: any;
-  }): Promise<void> {
-    const { workspace, path: filePath, search, replace,
-            start_line, end_line, use_regex, ignore_case } = context.parameters;
-
-    const resolved = resolveInFolder(workspace, '');
-    if ('error' in resolved) {
-      context.pushError(JSON.stringify({ error: resolved.error }));
-      return;
-    }
-
-    const searchAndReplaceTool = getBobTool(context.env.id, 'search_and_replace');
-    if (!searchAndReplaceTool) {
-      context.pushError('search_and_replace_workspace: search_and_replace tool not found in current task.');
-      return;
-    }
-
-    await searchAndReplaceTool.call({
-      ...context,
-      env: {
-        ...context.env,
-        workspace: resolved.uri.fsPath,
-      },
-      parameters: {
-        path: filePath,
-        search,
-        replace,
-        ...(start_line  !== undefined && { start_line }),
-        ...(end_line    !== undefined && { end_line }),
-        ...(use_regex   !== undefined && { use_regex }),
-        ...(ignore_case !== undefined && { ignore_case }),
-      },
-      pushEdit: (uri: string, edit: { before: string; after: string; mtime?: number }) => {
-        context.setMetadata?.({
-          changes: { [uri]: { before: edit.before, after: edit.after, patch: createPatch(uri, edit.before, edit.after) } },
-          ...(edit.mtime !== undefined && { fileMtimes: { [uri]: edit.mtime } }),
-        });
-      },
-    });
-  }
-}
-
-// ─── apply_diff_workspace ─────────────────────────────────────────────────────
-
-export class ApplyDiffWorkspaceTool {
-  static id = 'apply_diff_workspace';
-  groups = ['edit'];
-  permission = 'edit';
-
-  getId() { return ApplyDiffWorkspaceTool.id; }
-
-  enabled(_env?: any): boolean { return workspaceToolsActive(); }
-
-  getDescription(_env?: any): string {
-    return (
-      'Apply SEARCH/REPLACE diff blocks to a file in any VS Code workspace folder. ' +
-      'Works identically to apply_diff but accepts a "workspace" parameter to target ' +
-      'secondary workspace roots that apply_diff cannot reach. ' +
-      'Requires at least one Bob turn to have completed so the diff engine is loaded.'
-    );
-  }
-
-  getCostEffectiveDescription(): string {
-    return 'Apply diff blocks to any workspace folder file (replaces apply_diff for non-primary folders)';
-  }
-
-  private static readonly PARAMS = [
-    {
-      name: 'workspace',
-      type: 'string',
-      detail: 'Workspace folder name as returned by list_workspace_folders (e.g. "backend").',
-      required: true,
-      usage: 'backend',
-      renderHint: 'hidden',
-    },
-    {
-      name: 'path',
-      type: 'string',
-      detail: 'File path relative to the workspace folder root (e.g. "src/app.ts").',
-      required: true,
-      usage: 'src/server.ts',
-      renderHint: 'hidden',
-    },
-    {
-      name: 'diff',
-      type: 'string',
-      detail: 'The search/replace block defining the changes.',
-      required: true,
-      renderHint: 'diff',
-    },
-  ];
-
-  // Property - read by toolToOpenAi(e).parameters
-  parameters = paramsToSchema(ApplyDiffWorkspaceTool.PARAMS);
-
-  // Method - read by the newer getParameters(env) paths
-  getParameters(_env?: any): any[] { return ApplyDiffWorkspaceTool.PARAMS; }
-
-  getLabels(args: Record<string, any>) {
-    const loc = ` to ${labelPath(args.workspace, args.path)}`;
-    return {
-      displayName: `Apply Diff${loc}`,
-      running:     `Applying diff${loc}`,
-      success:     `Applied diff${loc}`,
-      error:       `Failed to apply diff${loc}`,
-      runningLong: bobRunningLong('apply_diff'),
-    };
-  }
-
-  async call(context: {
-    env: any;
-    parameters: { workspace: string; path: string; diff: string };
-    pushResult: (text: string) => void;
-    pushError: (text: string) => void;
-    setMetadata?: (meta: Record<string, any>) => void;
-    [key: string]: any;
-  }): Promise<void> {
-    const { workspace, path: filePath, diff } = context.parameters;
-
-    const resolved = resolveInFolder(workspace, '');
-    if ('error' in resolved) {
-      context.pushError(resolved.error);
-      return;
-    }
-
-    const applyDiffTool = getBobTool(context.env.id, 'apply_diff');
-    if (!applyDiffTool) {
-      context.pushError(
-        'apply_diff_workspace: apply_diff tool not found in current task.'
-      );
-      return;
-    }
-
-    await applyDiffTool.call({
-      ...context,
-      env: {
-        ...context.env,
-        workspace: resolved.uri.fsPath,
-      },
-      parameters: { path: filePath, diff },
-      pushEdit: (uri: string, edit: { before: string; after: string; mtime?: number }) => {
-        context.setMetadata?.({
-          changes: { [uri]: { before: edit.before, after: edit.after, patch: createPatch(uri, edit.before, edit.after) } },
-          ...(edit.mtime !== undefined && { fileMtimes: { [uri]: edit.mtime } }),
-        });
-      },
-    });
-  }
-}
-
-// ─── Execute workspace command ────────────────────────────────────────────────
-
-/**
- * Execute a CLI command with its working directory resolved against a named
- * workspace folder instead of Bob's primary workspace root.
- *
- * This is a thin wrapper that delegates entirely to Bob's built-in
- * execute_command tool — it resolves the workspace folder to an absolute
- * fsPath, then calls execute_command with that path as `cwd`.  Because the
- * resolution happens here (inside the extension-host process), Bob's
- * isOutsideWorkspace check is never triggered.
- *
- * To stay in sync with execute_command automatically the `call()` method
- * never reimplements shell execution — it just forwards to the built-in.
- */
-export class ExecuteWorkspaceCommandTool {
-  static id = 'execute_workspace_command';
-  groups = ['execute'];
-  permission = 'execute';
-
-  getId() { return ExecuteWorkspaceCommandTool.id; }
-
-  enabled(_env?: any): boolean { return workspaceToolsActive(); }
-
-  getDescription(_env?: any): string {
-    return [
-      'Execute a CLI command with its working directory set to a specific workspace folder.',
-      'IMPORTANT: You MUST use this tool instead of execute_command whenever the target',
-      'directory is in a secondary workspace folder (not the primary one). Using',
-      'execute_command for a secondary folder will be blocked by the sandbox — always use',
-      'this tool for those folders.',
-      '',
-      'All execute_command semantics apply: PowerShell on Windows, bash/sh on macOS/Linux,',
-      'the cwd defaults to the workspace folder root, and timeout_seconds is optional.',
-      '',
-      'WORKFLOW: call list_workspace_folders → copy the folder "name" → pass it as',
-      '"workspace". The "cwd" parameter is RELATIVE to that workspace folder root.',
-    ].join('\n');
-  }
-
-  getCostEffectiveDescription(): string {
-    return 'Execute a shell command in a secondary workspace folder (replaces execute_command for non-primary folders)';
-  }
-
-  private static readonly PARAMS = [
-    {
-      name: 'workspace',
-      type: 'string',
-      description: 'Workspace folder name as returned by list_workspace_folders (e.g. "backend").',
-      detail: 'Workspace folder name',
-      required: true,
-      usage: 'backend',
-      renderHint: 'hidden',
-    },
-    {
-      name: 'command',
-      type: 'string',
-      description: 'The CLI command to execute.',
-      detail: 'The CLI command to execute',
-      required: true,
-      usage: 'command',
-      renderHint: 'code',
-    },
-    {
-      name: 'cwd',
-      type: 'string',
-      description: 'Working directory relative to the workspace folder root. Omit to use the folder root itself.',
-      detail: 'Working directory relative to workspace folder root (optional)',
-      required: false,
-      usage: 'src',
-    },
-    {
-      name: 'timeout_seconds',
-      type: 'number',
-      description: 'Override the default 30s timeout for known slow commands (e.g. large installs, builds, test suites). Must be the minimum needed; maximum 270s.',
-      detail: 'Timeout override in seconds (optional, default 30, max 270)',
-      required: false,
-    },
-    {
-      name: 'background',
-      type: 'boolean',
-      description: 'When true, runs the command in the background: stdout and stderr are redirected to a log file and the tool returns immediately with the process pid and the log file path. Use this for servers, watchers, and other long-running processes.',
-      detail: 'Run in background (optional)',
-      required: false,
-      renderHint: 'hidden',
-    },
-  ];
-
-  // Property - read by toolToOpenAi(e).parameters
-  parameters = paramsToSchema(ExecuteWorkspaceCommandTool.PARAMS);
-
-  // Method - read by the newer getParameters(env) paths
-  getParameters(_env?: any): any[] { return ExecuteWorkspaceCommandTool.PARAMS; }
-
-  getLabels(args: Record<string, any>) {
-    const loc = labelPath(args.workspace, args.cwd);
-    return {
-      displayName: `Execute Workspace Command: ${loc}`,
-      running: `Running in ${loc}…`,
-      success: `Command completed in ${loc}`,
-      error: `Command failed in ${loc}`,
-      runningLong: bobRunningLong('execute_command'),
-    };
-  }
-
-  async call(context: {
-    env: any;
-    parameters: Record<string, any>;
-    pushResult: (text: string) => void;
-    pushError: (text: string) => void;
-    log?: (...args: any[]) => void;
-  }): Promise<void> {
-    const { workspace, command, cwd, timeout_seconds, background } = context.parameters;
-
-    // Resolve the workspace folder to an absolute fsPath
-    const cwdArg = (cwd && cwd !== '.') ? cwd : '';
-    const resolved = resolveInFolder(workspace, cwdArg);
-    if ('error' in resolved) {
-      context.pushError(resolved.error);
-      return;
-    }
-
-    const absoluteCwd = resolved.uri.fsPath;
-
-    // Delegate to Bob's built-in execute_command.
-    // We pass an absolute cwd which is valid — Bob only blocks relative paths
-    // that escape the primary workspace; an absolute path it accepts directly.
-    // The only thing we cannot reuse is execute_command's internal call() since
-    // it is inside the closed Bob bundle, so we call the registered tool instead.
-    const executeCommandTool = getBobTool(context.env.id, 'execute_command');
-    if (!executeCommandTool) {
-      context.pushError(
-        'execute_workspace_command: execute_command tool not found in current task.'
-      );
-      return;
-    }
-
-    // Build a forwarded context that patches env.workspace to the resolved folder
-    // so execute_command's cwd computation is anchored correctly.
-    const forwardedContext = {
-      ...context,
-      env: {
-        ...context.env,
-        workspace: absoluteCwd,
-      },
-      parameters: {
-        command,
-        // cwd is not passed — execute_command defaults to env.workspace (now absoluteCwd)
-        ...(timeout_seconds !== undefined && { timeout_seconds }),
-        ...(background !== undefined && { background }),
-      },
-    };
-
-    await executeCommandTool.call(forwardedContext);
-  }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-
-/**
- * Find a symbol by name/path pattern in any workspace folder.
- *
- * Bob's built-in FindSymbol calls `getWorkspaceSymbols(workspaceUri, name)`
- * where workspaceUri is hardwired to `env.workspace` (the primary root).
- * Patching `env.workspace` to the secondary folder root makes the language
- * server query the right folder, and also fixes `filter_path` resolution
- * (which is `path.resolve(env.workspace, filter_path)`).
- */
-export class FindSymbolWorkspaceTool {
-  static id = 'find_symbol_workspace';
-  groups = ['read'];
-  permission = 'read';
-
-  getId() { return FindSymbolWorkspaceTool.id; }
-
-  enabled(_env?: any): boolean { return workspaceToolsActive(); }
-
-  getDescription(_env?: any): string {
-    return (
-      'Retrieves information on all symbols/code entities (classes, methods, etc.) based on ' +
-      'the given name path pattern, searching within any VS Code workspace folder. ' +
-      'MUST be used instead of FindSymbol for files in secondary workspace folders.\n\n' +
-      'Specify `depth > 0` to also retrieve children/descendants (e.g., methods of a class).\n\n' +
-      'The name_path_pattern can be:\n' +
-      ' * a simple name (e.g. "method"), which will match any symbol with that name\n' +
-      ' * a relative path like "class/method", which will match any symbol with that name path suffix'
-    );
-  }
-
-  getCostEffectiveDescription(): string {
-    return 'Find symbols by name in any workspace folder (use instead of FindSymbol for non-primary folders)';
-  }
-
-  private static readonly PARAMS = [
-    {
-      name: 'workspace',
-      type: 'string',
-      description: 'Workspace folder name as returned by list_workspace_folders (e.g. "backend").',
-      detail: 'Workspace folder name',
-      required: true,
-      usage: 'backend',
-      renderHint: 'hidden',
-    },
-    {
-      name: 'name_path_pattern',
-      type: 'string',
-      description: 'The name path pattern to search for (e.g. "MyClass" or "MyClass/myMethod").',
-      detail: 'Symbol name or path pattern',
-      required: true,
-    },
-    {
-      name: 'depth',
-      type: 'number',
-      description: 'Depth up to which descendants shall be retrieved. Default 0.',
-      detail: 'Child depth (0 = symbol only)',
-      required: false,
-    },
-    {
-      name: 'filter_path',
-      type: 'string',
-      description: 'File or directory path relative to the workspace folder root to restrict the search.',
-      detail: 'Path filter (relative to workspace folder)',
-      required: false,
-      usage: 'src/api',
-    },
-    {
-      name: 'include_body',
-      type: 'boolean',
-      description: 'If true, include the symbol\'s source code.',
-      detail: 'Include source body',
-      required: false,
-    },
-    {
-      name: 'substring_matching',
-      type: 'boolean',
-      description: 'If true, use substring matching for the last element of the pattern.',
-      detail: 'Substring match',
-      required: false,
-    },
-  ];
-
-  parameters = paramsToSchema(FindSymbolWorkspaceTool.PARAMS);
-  getParameters(_env?: any): any[] { return FindSymbolWorkspaceTool.PARAMS; }
-
-  getLabels(args: Record<string, any>) {
-    const loc = args.workspace ? ` in ${args.workspace}` : '';
-    const pat = args.name_path_pattern ? ` {name_path_pattern}` : '';
-    return {
-      displayName: `Find Symbol${pat}${loc}`,
-      running: `Finding symbol${pat}${loc}`,
-      success: `Symbol found${pat}${loc}`,
-      error: `Failed to find symbol${pat}${loc}`,
-    };
-  }
-
-  async call(context: {
-    env: any;
-    parameters: {
-      workspace: string;
-      name_path_pattern: string;
-      depth?: number;
-      filter_path?: string;
-      include_body?: boolean;
-      substring_matching?: boolean;
-    };
-    pushResult: (text: string) => void;
-    pushError: (text: string) => void;
-    [key: string]: any;
-  }): Promise<void> {
-    const { workspace, name_path_pattern, depth, filter_path, include_body, substring_matching } = context.parameters;
-
-    const resolved = resolveInFolder(workspace, '');
-    if ('error' in resolved) {
-      context.pushError(resolved.error);
-      return;
-    }
-
-    const findSymbolTool = getBobTool(context.env.id, 'FindSymbol');
-    if (!findSymbolTool) {
-      context.pushError('find_symbol_workspace: FindSymbol tool not found in current task.');
-      return;
-    }
-
-    await findSymbolTool.call({
-      ...context,
-      env: {
-        ...context.env,
-        workspace: resolved.uri.fsPath,
-      },
-      parameters: {
-        name_path_pattern,
-        ...(depth !== undefined && { depth }),
-        ...(filter_path !== undefined && { filter_path }),
-        ...(include_body !== undefined && { include_body }),
-        ...(substring_matching !== undefined && { substring_matching }),
-      },
-    });
-  }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-
-/**
- * Find references to a symbol defined in any workspace folder.
- *
- * Bob's built-in FindReferencingSymbols resolves `relative_path` via
- * `path.join(env.workspace, relative_path)`. Patching `env.workspace` to
- * the secondary folder root and passing a path relative to that root
- * makes the file URI resolve correctly.
- */
-export class FindReferencingSymbolsWorkspaceTool {
-  static id = 'find_referencing_symbols_workspace';
-  groups = ['read'];
-  permission = 'read';
-
-  getId() { return FindReferencingSymbolsWorkspaceTool.id; }
-
-  enabled(_env?: any): boolean { return workspaceToolsActive(); }
-
-  getDescription(_env?: any): string {
-    return (
-      'Finds references to the symbol at the given name_path_pattern in any VS Code workspace folder. ' +
-      'MUST be used instead of FindReferencingSymbols for files in secondary workspace folders. ' +
-      'The result will contain metadata about the referencing symbols as well as a short code snippet around the reference.'
-    );
-  }
-
-  getCostEffectiveDescription(): string {
-    return 'Find references to a symbol in any workspace folder (use instead of FindReferencingSymbols for non-primary folders)';
-  }
-
-  private static readonly PARAMS = [
-    {
-      name: 'workspace',
-      type: 'string',
-      description: 'Workspace folder name as returned by list_workspace_folders (e.g. "backend").',
-      detail: 'Workspace folder name',
-      required: true,
-      usage: 'backend',
-      renderHint: 'hidden',
-    },
-    {
-      name: 'name_path_pattern',
-      type: 'string',
-      description: 'The name path pattern to search for.',
-      detail: 'Symbol name or path pattern',
-      required: true,
-    },
-    {
-      name: 'relative_path',
-      type: 'string',
-      description: 'File path relative to the workspace folder root containing the symbol.',
-      detail: 'File path relative to workspace folder',
-      required: true,
-      usage: 'src/utils/stringUtils.js',
-    },
-  ];
-
-  parameters = paramsToSchema(FindReferencingSymbolsWorkspaceTool.PARAMS);
-  getParameters(_env?: any): any[] { return FindReferencingSymbolsWorkspaceTool.PARAMS; }
-
-  getLabels(args: Record<string, any>) {
-    const loc = args.workspace ? ` in ${args.workspace}` : '';
-    const pat = args.name_path_pattern ? ` for {name_path_pattern}` : '';
-    return {
-      displayName: `Find Referencing Symbols${pat}${loc}`,
-      running: `Finding references${pat}${loc}`,
-      success: `References found${pat}${loc}`,
-      error: `Failed to find references${pat}${loc}`,
-    };
-  }
-
-  async call(context: {
-    env: any;
-    parameters: {
-      workspace: string;
-      name_path_pattern: string;
-      relative_path: string;
-    };
-    pushResult: (text: string) => void;
-    pushError: (text: string) => void;
-    [key: string]: any;
-  }): Promise<void> {
-    const { workspace, name_path_pattern, relative_path } = context.parameters;
-
-    const resolved = resolveInFolder(workspace, '');
-    if ('error' in resolved) {
-      context.pushError(resolved.error);
-      return;
-    }
-
-    const findRefTool = getBobTool(context.env.id, 'FindReferencingSymbols');
-    if (!findRefTool) {
-      context.pushError('find_referencing_symbols_workspace: FindReferencingSymbols tool not found in current task.');
-      return;
-    }
-
-    await findRefTool.call({
-      ...context,
-      env: {
-        ...context.env,
-        workspace: resolved.uri.fsPath,
-      },
-      parameters: {
-        name_path_pattern,
-        relative_path,
-      },
-    });
+  if (!patchLogged && patchedPrototypes.size > 0) {
+    logger.log(`multi-root sandbox patch: applied to ${patchedPrototypes.size} built-in tool class(es)`);
+    patchLogged = true;
   }
 }
 
 // ─── Registration ─────────────────────────────────────────────────────────────
 
 /**
- * Register all workspace tools with Bob's source registry.
- * These tools use vscode.workspace.fs directly, so they bypass Bob's
- * single-root sandbox and never trigger "outside workspace" confirmation prompts.
- *
- * Tools registered (13):
- *   list_workspace_folders              - discover all workspace roots
- *   read_workspace_file                 - read any file (replaces read_file)
- *   write_workspace_file                - write/create any file (replaces write_file)
- *   list_workspace_files                - browse any directory (replaces list_files)
- *   glob_workspace                      - find files by glob (replaces glob)
- *   grep_workspace                      - search file contents (replaces grep)
- *   insert_workspace_content            - insert lines without overwriting (replaces insert_content)
- *   search_and_replace_workspace        - find/replace in file (replaces search_and_replace)
- *   apply_diff_workspace                - apply diff blocks (replaces apply_diff)
- *   execute_workspace_command           - run a command in any workspace folder (replaces execute_command)
- *   find_symbol_workspace               - find symbols by name (replaces FindSymbol)
- *   find_referencing_symbols_workspace  - find symbol references (replaces FindReferencingSymbols)
- *   read_workspace_video_file           - extract video frames from any workspace folder (replaces read_video_file)
+ * Register the multi-root workspace support with Bob's source registry:
+ * the list_workspace_folders tool, the system-prompt injection that teaches
+ * the model the multi-root path rules, and the multi-root sandbox patch that
+ * makes Bob's built-in tools work on every workspace folder without approval.
  */
-
-// ─── Video workspace proxy ────────────────────────────────────────────────────
-
-export class ReadVideoFileWorkspaceTool {
-  static id = 'read_workspace_video_file';
-  groups = ['read'];
-  permission = 'read';
-
-  getId() { return ReadVideoFileWorkspaceTool.id; }
-
-  enabled(_env?: any): boolean { return workspaceToolsActive() && isAreaEnabled('Video'); }
-
-  getDescription(_env?: any): string {
-    return (
-      'Extract frames from a video file in any workspace folder — including secondary folders ' +
-      'that are outside the primary workspace root. Use instead of read_video_file for files ' +
-      'in secondary workspace folders. Call list_workspace_folders first to get the folder name, ' +
-      'then pass it as "workspace". Supports the same vf_filter, seek, and frames_count parameters.'
-    );
-  }
-
-  getCostEffectiveDescription(): string {
-    return 'Extract video frames from any workspace folder (use instead of read_video_file for non-primary folders)';
-  }
-
-  private static readonly PARAMS = [
-    {
-      name: 'workspace',
-      type: 'string',
-      description: 'Workspace folder name as returned by list_workspace_folders (e.g. "backend").',
-      detail: 'Workspace folder name',
-      required: true,
-      usage: 'backend',
-    },
-    {
-      name: 'video_path',
-      type: 'string',
-      description: 'Path to the video file, relative to the workspace folder root.',
-      detail: 'Video file path relative to workspace folder',
-      required: true,
-      usage: 'recordings/demo.mp4',
-      renderHint: 'text',
-    },
-    ...ReadVideoFileTool.PARAMS.filter(p => p.name !== 'video_path'),
-  ] as const;
-
-  parameters = paramsToSchema(ReadVideoFileWorkspaceTool.PARAMS);
-  getParameters(_env?: any): any[] { return ReadVideoFileWorkspaceTool.PARAMS as any; }
-
-  getLabels(args: Record<string, any>) {
-    const file = ` ${labelPath(args.workspace, args.video_path)}`;
-    const hint = args?.vf_filter
-      ? `filter: ${args.vf_filter}`
-      : `${args?.frames_count ?? DEFAULT_VIDEO_FRAMES} frames`;
-    return {
-      displayName: `Read video${file}`,
-      running: `Extracting frames from${file} (${hint})...`,
-      success: `Extracted frames from${file}`,
-      error: `Failed to extract frames from${file}`,
-    };
-  }
-
-  async call(context: {
-    env: any;
-    parameters: { workspace: string; video_path: string; vf_filter?: string; seek?: string; frames_count?: number };
-    pushResult: (text: string) => void;
-    pushError: (text: string) => void;
-    [key: string]: any;
-  }): Promise<void> {
-    const { workspace: folderName, video_path, ...rest } = context.parameters;
-
-    const resolved = resolveInFolder(folderName, '');
-    if ('error' in resolved) {
-      context.pushError(resolved.error);
-      return;
-    }
-
-    // Call ReadVideoFileTool directly (not via getBobTool) because Bob wraps
-    // registered tools and re-injects env from t.getEnvs() at call time,
-    // discarding any env.workspace patch we pass in.
-    await new ReadVideoFileTool().call({
-      ...context,
-      env: {
-        ...context.env,
-        workspace: resolved.uri.fsPath,
-      },
-      parameters: {
-        video_path,
-        ...rest,
-      },
-    });
-  }
-}
-
 export function registerWorkspaceTools(source: any) {
   source.registerTool(new ListWorkspaceFoldersTool());
-  source.registerTool(new ReadWorkspaceFileTool());
-  source.registerTool(new WriteWorkspaceFileTool());
-  source.registerTool(new ListWorkspaceFilesTool());
-  source.registerTool(new GlobWorkspaceTool());
-  source.registerTool(new GrepWorkspaceTool());
-  source.registerTool(new InsertWorkspaceContentTool());
-  source.registerTool(new SearchAndReplaceWorkspaceTool());
-  source.registerTool(new ApplyDiffWorkspaceTool());
-  source.registerTool(new ExecuteWorkspaceCommandTool());
-  source.registerTool(new FindSymbolWorkspaceTool());
-  source.registerTool(new FindReferencingSymbolsWorkspaceTool());
-  source.registerTool(new ReadVideoFileWorkspaceTool());
   registerWorkspacePromptInjection(source);
-  registerBuiltinToolRedirectGuard(source);
+  installMultiRootSandboxPatch(source);
 }
 
 /**
@@ -1848,11 +483,11 @@ export function registerWorkspaceTools(source: any) {
  */
 function registerWorkspacePromptInjection(source: any) {
   source.onTurnStart((taskId: string, _envs: any, isEmpty: boolean) => {
-    if (!isEmpty || !workspaceToolsActive()) { return; }
+    if (!isEmpty || !isMultiRoot()) { return; }
 
     const injection = buildInjection(vscode.workspace.workspaceFolders ?? []);
 
-    const MAX_POLLS = 50;
+    const MAX_POLLS = 50;   // ~500 ms total
     const POLL_MS   = 10;
     let   attempts  = 0;
 
@@ -1886,224 +521,46 @@ function registerWorkspacePromptInjection(source: any) {
   });
 }
 
-/** Built-in tool name → workspace equivalent name + path parameter name. */
-const BUILTIN_REDIRECTS: Record<string, { replacement: string; pathParam: string }> = {
-  read_file:            { replacement: 'read_workspace_file',           pathParam: 'path' },
-  write_file:           { replacement: 'write_workspace_file',          pathParam: 'path' },
-  list_files:           { replacement: 'list_workspace_files',          pathParam: 'path' },
-  glob:                 { replacement: 'glob_workspace',                pathParam: 'path' },
-  grep:                 { replacement: 'grep_workspace',                pathParam: 'path' },
-  insert_content:       { replacement: 'insert_workspace_content',      pathParam: 'path' },
-  search_and_replace:   { replacement: 'search_and_replace_workspace',  pathParam: 'path' },
-  apply_diff:           { replacement: 'apply_diff_workspace',          pathParam: 'path' },
-  execute_command:      { replacement: 'execute_workspace_command',     pathParam: 'cwd' },
-  read_video_file:      { replacement: 'read_workspace_video_file',     pathParam: 'video_path' },
-};
-
-/**
- * Symbol tools that need workspace variants — listed separately from
- * BUILTIN_REDIRECTS because they have no single path parameter to intercept
- * and cannot be caught by the redirect guard. They are included only in the
- * system-prompt injection so the model knows to use them.
- */
-const SYMBOL_TOOL_REDIRECTS: Record<string, string> = {
-  FindSymbol:               'find_symbol_workspace',
-  FindReferencingSymbols:   'find_referencing_symbols_workspace',
-};
-
-/**
- * Intercept Bob's built-in sandboxed tools when they are called with a path
- * that belongs to a secondary workspace folder.
- *
- * Without this guard, if "Allow outside workspace" is ON, Bob silently passes
- * sandbox validation and the call either reads the wrong file (resolved against
- * the primary root) or errors with a confusing OS-level message. If the setting
- * is OFF, Bob returns a sandbox error which the model understands. This guard
- * makes the behaviour consistent regardless of that setting: always return a
- * clear, actionable redirect message.
- *
- * onToolWillExecute(env, toolId, args) signature confirmed from Bob internals:
- *   - env:    task environment (getEnvs())
- *   - toolId: string tool name (a.signature.name)
- *   - args:   parsed parameter object (a.signature.arguments)
- * Returning { cancel: true, note: string } aborts execution and surfaces note to the model.
- */
-function registerBuiltinToolRedirectGuard(source: any) {
-  source.onToolWillExecute((_env: any, toolId: string, args: Record<string, any>) => {
-    // Redirecting to workspace tools that are hidden would leave the model stuck.
-    if (!workspaceToolsActive()) { return; }
-    return checkBuiltinToolRedirect(toolId, args, vscode.workspace.workspaceFolders ?? []);
-  });
-}
-
-/**
- * Pure detection logic for the redirect guard — separated for testability.
- *
- * Returns { cancel: true, note, message } when the call should be blocked, or
- * undefined when it should proceed normally.
- */
-export function checkBuiltinToolRedirect(
-  toolId: string,
-  args: Record<string, any>,
-  folders: readonly { name: string; uri: { fsPath: string } }[],
-): { cancel: true; message: string; note: string } | undefined {
-  const redirect = BUILTIN_REDIRECTS[toolId];
-  if (!redirect) { return; }
-  if (folders.length < 2) { return; }  // single-root: no secondary folders, no issue
-
-  const primaryFsPath = folders[0].uri.fsPath;
-  const rawPath: string | undefined = args?.[redirect.pathParam];
-  if (!rawPath) { return; }
-
-  // Resolve to absolute: if already absolute use as-is, else join with primary root
-  // (Bob's built-in tools resolve relative paths against the primary workspace root)
-  const absPath = path.isAbsolute(rawPath)
-    ? rawPath
-    : path.join(primaryFsPath, rawPath);
-
-  // Check if absPath sits inside a secondary folder
-  const secondaryFolder = folders.slice(1).find(f => {
-    const fsPath = f.uri.fsPath;
-    return absPath === fsPath || absPath.startsWith(fsPath + path.sep);
-  });
-
-  if (!secondaryFolder) { return; }
-
-  const text = (
-    `\`${toolId}\` is sandboxed to the primary workspace folder ` +
-    `("${folders[0].name}" at ${primaryFsPath}).\n` +
-    `The path "${rawPath}" is inside the secondary folder "${secondaryFolder.name}".\n` +
-    `Use \`${redirect.replacement}\` with workspace="${secondaryFolder.name}" instead, ` +
-    `and pass the path relative to that folder's root.`
-  );
-
-  return {
-    cancel: true,
-    message: text,
-    note: text,
-  };
-}
-
 function buildInjection(folders: readonly vscode.WorkspaceFolder[]): string {
   const folderLines = folders.map(f => `  - name="${f.name}"  fsPath="${f.uri.fsPath}"`);
-  const builtinNames = Object.keys(BUILTIN_REDIRECTS).join(', ');
-  const allReplacements = [
-    ...Object.values(BUILTIN_REDIRECTS).map(r => r.replacement),
-    ...Object.values(SYMBOL_TOOL_REDIRECTS),
-  ];
-  const maxLen = Math.max(...allReplacements.map(r => r.length));
-  const toolLines = Object.entries(BUILTIN_REDIRECTS).map(([builtin, { replacement }]) =>
-    `  ${replacement.padEnd(maxLen)}  - replaces ${builtin}`
-  );
-  const symbolToolLines = Object.entries(SYMBOL_TOOL_REDIRECTS).map(([builtin, replacement]) =>
-    `  ${replacement.padEnd(maxLen)}  - replaces ${builtin}`
-  );
   return [
     '',
     '<multi_root_workspace>',
     `This is a multi-root workspace with ${folders.length} root folders:`,
     ...folderLines,
     '',
-    `The PRIMARY folder (used by built-in tools) is: ${folders[0].uri.fsPath}`,
-    `IMPORTANT: Built-in tools (${builtinNames}) are NOT aware of secondary workspace`,
-    `folders (all folders listed above except the first). For any path inside a`,
-    `secondary folder, you MUST use the workspace-specific tools below — built-in`,
-    `tools will either be blocked or produce wrong results for those paths.`,
+    `The PRIMARY folder (against which relative paths resolve) is: ${folders[0].uri.fsPath}`,
+    'All tools work on files in EVERY folder listed above - secondary folders need no',
+    'special permission. Path rules for secondary folders:',
+    '- prefer absolute paths (see the fsPath values above), or',
+    '- use "../<folder-name>/..." relative to the primary root, or',
+    '- use "<folder-name>/..." - when that path does not exist under the primary root,',
+    '  it is resolved inside the named workspace folder (this also applies to the',
+    '  filter_path/relative_path parameters of FindSymbol/FindReferencingSymbols).',
     '',
-    'You MUST use the workspace-specific tools for any secondary folder:',
-    ...toolLines,
-    '',
-    'For symbol search in secondary folders, use the workspace-specific variants:',
-    ...symbolToolLines,
-    '',
-    'WORKFLOW: call list_workspace_folders → copy the folder "name" → pass it as the',
-    '"workspace" parameter to the tool above.',
-    'The "path"/"cwd" parameter on those tools is always RELATIVE to the workspace folder root.',
+    'WORKFLOW: call list_workspace_folders to discover the folder names and paths.',
     '</multi_root_workspace>',
   ].join('\n');
 }
 
 /**
- * Remap workspace tool names so Bob's webview renderer applies the same rich
- * UI (CodeBlock, FileListBlock, GrepResultBlock) that it uses for the built-in
- * equivalents.
+ * Fix click-to-open for secondary workspace folders.
  *
- * The renderer in chat-*.js keys off `toolUsage.signature.name` inside the
- * messages array of a `{ type: "setMessages" }` postMessage.  Our workspace
- * tools have different names, so without this patch they fall through to the
- * plain MarkdownBlock path.
- *
- * Approach:
- *   1. For every chatManager in _chatManagers, wrap cm.ui.setWebview() so that
- *      each time a webview is assigned we immediately patch view.sendMessage()
- *      on that webview instance.
- *   2. The sendMessage patch intercepts { type: "setMessages" } and remaps
- *      toolUsage.signature.name in each message's toolUsage.
- *   3. Patch _chatManagers.push() to apply the same treatment to future
- *      chatManagers.
+ * Bob's webview handler resolves relative paths in `openFile` messages
+ * against the primary workspace root, so clicks on secondary-folder file
+ * mentions open the wrong file. This patch wraps the `openFile` handler on
+ * every webview (current and future, via cm.ui.setWebview and the
+ * _chatManagers.push intercept) and rewrites `./<folderName>/...` paths to
+ * their absolute location before Bob's own handler sees them.
  *
  * Called once from completeRegisterPowerToys(), after registerTaskManager()
  * has populated _cachedTaskManager.
  */
-export function registerWebviewToolNamePatch(): void {
-  const NAME_MAP: Record<string, string> = {
-    read_workspace_file:  'read_file',
-    list_workspace_files: 'list_files',
-    glob_workspace:       'glob',
-    grep_workspace:       'grep',
-  };
-
+export function registerWebviewOpenFilePatch(): void {
   const tm = getTaskManager();
   if (!tm) { return; }
 
   const chatManagers: any[] = tm._chatManagers ?? [];
-
-  /** Patch sendMessage (outbound) and onMessage (inbound) on a single webview instance. */
-  function patchView(view: any): void {
-    if (!view || view.__bobPtPatchedSendMessage) { return; }
-
-    // ── outbound: remap tool names so the renderer uses rich UI components ──
-    const originalSend = view.sendMessage.bind(view);
-    view.sendMessage = (message: any) => {
-      if (message?.type === 'setMessages' && Array.isArray(message.messages)) {
-        let changed = false;
-        const newMessages = message.messages.map((msg: any) => {
-          const name: string | undefined = msg?.toolUsage?.signature?.name;
-          const mapped = name && NAME_MAP[name];
-          if (!mapped) { return msg; }
-          changed = true;
-          return {
-            ...msg,
-            toolUsage: {
-              ...msg.toolUsage,
-              signature: { ...msg.toolUsage.signature, name: mapped },
-            },
-          };
-        });
-        if (changed) {
-          message = { ...message, messages: newMessages };
-        }
-      }
-      return originalSend(message);
-    };
-
-    // ── inbound: fix openFile paths for secondary workspace folders ──
-    // Bob's handler resolves relative paths against the primary workspace root.
-    // If the path starts with a known folder name (e.g. "process-discovery/src/…")
-    // we rewrite it to the absolute path before Bob's handler sees it.
-    //
-    // wrapHandler wraps a single handler function; we use it for both the
-    // already-registered handler and any future registration via onMessage.
-    if (view.handlers?.openFile) {
-      view.handlers.openFile = wrapHandler(view.handlers.openFile);
-    }
-    const originalOnMessage = view.onMessage.bind(view);
-    view.onMessage = (type: string, handler: (msg: any) => any) => {
-      return originalOnMessage(type, type === 'openFile' ? wrapHandler(handler) : handler);
-    };
-
-    view.__bobPtPatchedSendMessage = true;
-  }
 
   /** Returns a wrapped version of an openFile handler that resolves secondary paths. */
   function wrapHandler(handler: (msg: any) => any): (msg: any) => any {
@@ -2115,6 +572,21 @@ export function registerWebviewToolNamePatch(): void {
     };
     (wrapped as any).__bobPtWrapped = true;
     return wrapped;
+  }
+
+  /** Patch the openFile handler registration on a single webview instance. */
+  function patchView(view: any): void {
+    if (!view || view.__bobPtPatchedOpenFile) { return; }
+
+    if (view.handlers?.openFile) {
+      view.handlers.openFile = wrapHandler(view.handlers.openFile);
+    }
+    const originalOnMessage = view.onMessage.bind(view);
+    view.onMessage = (type: string, handler: (msg: any) => any) => {
+      return originalOnMessage(type, type === 'openFile' ? wrapHandler(handler) : handler);
+    };
+
+    view.__bobPtPatchedOpenFile = true;
   }
 
   /**

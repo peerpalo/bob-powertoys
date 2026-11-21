@@ -2,9 +2,37 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
-import { paramsToSchema, isAreaEnabled } from '../utils.js';
+import * as vscode from 'vscode';
+import { paramsToSchema, isAreaEnabled, normaliseWorkspacePath } from '../utils.js';
 
 const execFileAsync = promisify(execFile);
+
+/**
+ * Resolve a video path for a (possibly multi-root) workspace:
+ * absolute as-is; relative first against the workspace root Bob would use,
+ * then — if that does not exist — against a secondary folder whose name
+ * matches the first path segment. Falls back to the native resolution so the
+ * not-found error reports the path the model expects.
+ */
+function resolveVideoPath(
+  videoPath: string,
+  workspaceRoot: string,
+): string {
+  if (path.isAbsolute(videoPath)) { return videoPath; }
+  const native = path.resolve(workspaceRoot, videoPath);
+  if (fs.existsSync(native)) { return native; }
+
+  const folders = vscode.workspace.workspaceFolders ?? [];
+  const norm = normaliseWorkspacePath(videoPath);
+  const firstSeg = norm.split('/')[0];
+  const folder = folders.slice(1).find(f => f.name === firstSeg);
+  if (folder) {
+    const rest = norm.slice(firstSeg.length).replace(/^[/\\]/, '');
+    const candidate = rest ? path.join(folder.uri.fsPath, rest) : folder.uri.fsPath;
+    if (fs.existsSync(candidate)) { return candidate; }
+  }
+  return native;
+}
 
 // TODO: ffmpeg path is hardcoded to 'ffmpeg' (relies on PATH).
 // Upgrade path: add a 'ffmpegPath' config setting read from vscode.workspace.getConfiguration.
@@ -14,9 +42,10 @@ export const DEFAULT_VIDEO_FRAMES = 8;
 
 /**
  * Extract frames from a video file using ffmpeg.
- * Primary-workspace tool — uses usage:'filePath' so Bob enforces its own
- * sandbox policy (including the "Allow outside workspace" setting).
- * For secondary workspace folders in multi-root setups use read_video_file_workspace.
+ *
+ * Multi-root native: video_path may be absolute, relative to the primary
+ * workspace root, or start with a secondary workspace folder name (resolved
+ * inside that folder when the path does not exist under the primary root).
  */
 export class ReadVideoFileTool {
   static id = 'read_video_file';
@@ -40,7 +69,6 @@ export class ReadVideoFileTool {
       '- Time range ("between 5 and 20 seconds"): seek="5", vf_filter="select=\'between(t,0,15)\',setpts=N/FRAME_RATE/TB,fps=3"\n' +
       '- Visual condition ("when the screen turns blue"): vf_filter="fps=1" (dense sampling, scan frames)\n' +
       '- No temporal context: omit vf_filter — tool extracts ' + DEFAULT_VIDEO_FRAMES + ' evenly-spaced frames.\n\n' +
-      'For files in secondary workspace folders use read_video_file_workspace instead.\n' +
       'Requires ffmpeg to be installed and available on PATH.'
     );
   }
@@ -54,9 +82,8 @@ export class ReadVideoFileTool {
       name: 'video_path',
       required: true,
       type: 'string',
-      description: 'Path to the video file, relative to the workspace root.',
+      description: 'Path to the video file: absolute, or relative to the primary workspace root. In a multi-root workspace a relative path starting with a secondary folder name resolves inside that folder.',
       detail: 'Video file path',
-      usage: 'filePath', // Bob enforces workspace sandbox via this sentinel
       renderHint: 'text',
     },
     {
@@ -125,9 +152,7 @@ export class ReadVideoFileTool {
     }
 
     const workspace: string = context.env?.workspace ?? process.cwd();
-    const resolvedPath = path.isAbsolute(video_path)
-      ? video_path
-      : path.resolve(workspace, video_path);
+    const resolvedPath = resolveVideoPath(video_path, workspace);
 
     if (!fs.existsSync(resolvedPath)) {
       context.pushError(`Video file not found: ${resolvedPath}`);

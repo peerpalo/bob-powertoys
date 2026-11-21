@@ -5,12 +5,13 @@ import { registerTerminalCapture, registerTerminalConsoleTools } from './tools/t
 import { registerBreakpointTools } from './tools/breakpoints.js';
 import { registerDebugControlTools } from './tools/debugControl.js';
 import { registerUniverseAnswerTool } from './tools/universeAnswer.js';
-import { registerWorkspaceTools, registerWebviewToolNamePatch } from './tools/workspace.js';
+import { registerWorkspaceTools, registerWebviewOpenFilePatch } from './tools/workspace.js';
 import { registerBobExtensionsTools } from './tools/bobExtensions.js';
 import { registerVideoTools } from './tools/videos.js';
 import { registerDebugAdapterTracker } from './debugAdapter.js';
+import { registerMcpApps } from './mcp/apps.js';
+import { installMcpShare } from './mcp/share.js';
 import { registerTaskManager, forceFirstParty, EXTENSION_ID, EXTENSION_DISPLAY_NAME, logger, isAreaEnabled, isMultiRoot } from './utils.js';
-import { installMcpShare } from './mcpShare.js';
 import { registerTaskCommands, registerTaskPersistence, restoreTasks } from './taskManager.js';
 
 const BOB_EXTENSION_ID = 'IBM.bob-code';
@@ -105,7 +106,7 @@ export function activate(context: vscode.ExtensionContext) {
   // Log when a tool area setting changes.
   context.subscriptions.push(
     vscode.workspace.onDidChangeConfiguration(e => {
-      for (const area of ['Debug', 'Terminal', 'Workspace', 'Video', 'Extensions']) {
+      for (const area of ['Debug', 'Terminal', 'Video', 'Extensions']) {
         if (e.affectsConfiguration(`tools.enable${area}`)) {
           logger.log(`${area} tools ${isAreaEnabled(area) ? 'enabled' : 'disabled'}`);
         }
@@ -138,15 +139,16 @@ async function registerPowerToys(context: vscode.ExtensionContext, bobExports: a
     const bobRegisterTool = source.registerTool.bind(source);
     source.registerTool = (tool: any) => { registeredTools.push(tool); bobRegisterTool(tool); };
 
-    registerBreakpointTools(source);           // 3 tools
-    registerDebugControlTools(source);         // 5 tools
-    registerDebugConsoleTools(source);         // 6 tools
-    registerDebugSessionTools(source);         // 4 tools
-    registerTerminalConsoleTools(source);      // 4 tools
-    registerUniverseAnswerTool(source);        // 1 tool
-    registerWorkspaceTools(source);            // 11 tools (10 + read_workspace_video_file)
-    registerBobExtensionsTools(source);        // 1 tool
-    registerVideoTools(source);                // 1 tool
+    registerBreakpointTools(source);                      // 3 tools
+    registerDebugControlTools(source);                    // 5 tools
+    registerDebugConsoleTools(source);                    // 6 tools
+    registerDebugSessionTools(source);                    // 4 tools
+    registerTerminalConsoleTools(source);                 // 4 tools
+    registerUniverseAnswerTool(source);                   // 1 tool
+    registerWorkspaceTools(source);                       // multi-root workspace support (list_workspace_folders + sandbox patch)
+    registerBobExtensionsTools(source);                   // 1 tool
+    registerVideoTools(source);                           // 1 tool
+    registerMcpApps(source, context.extensionUri);        // experimental MCP Apps host (ui:// resources → panel)
     logger.log(`Successfully registered ${registeredTools.length} tools with Bob`);
 
     await completeRegisterPowerToys(context, bobExports, source);
@@ -193,7 +195,7 @@ async function completeRegisterPowerToys(
   registerTaskPersistence(context);
   await restoreTasks(context);
 
-  registerWebviewToolNamePatch();
+  registerWebviewOpenFilePatch();
   context.subscriptions.push(registerDebugAdapterTracker(bobExports));
   logger.log('Automatic breakpoint notifications enabled');
 
@@ -230,7 +232,7 @@ function showStatus() {
     '- Breakpoints: ' + vscode.debug.breakpoints.length,
     '- Open Terminals: ' + vscode.window.terminals.length,
     '',
-    'Disabled areas: ' + (['Debug', 'Terminal', 'Workspace', 'Video', 'Extensions']
+    'Disabled areas: ' + (['Debug', 'Terminal', 'Video', 'Extensions']
       .filter(a => !isAreaEnabled(a))
       .join(', ') || 'none'),
   ].join('\n');
