@@ -231,11 +231,11 @@ describe('isAreaEnabled', () => {
   it('is independent per area — disabling one does not affect another', () => {
     mockConfig['bob-powertoys.tools.debug.enabled'] = false;
     expect(isAreaEnabled('Terminal')).toBe(true);
-    expect(isAreaEnabled('Workspace')).toBe(true);
+    expect(isAreaEnabled('Video')).toBe(true);
   });
 
   it('handles all area names', () => {
-    for (const area of ['Debug', 'Terminal', 'Workspace', 'Video', 'Extensions']) {
+    for (const area of ['Debug', 'Terminal', 'Video', 'Extensions']) {
       mockConfig[`bob-powertoys.tools.${area.toLowerCase()}.enabled`] = false;
       expect(isAreaEnabled(area)).toBe(false);
       delete mockConfig[`bob-powertoys.tools.${area.toLowerCase()}.enabled`];

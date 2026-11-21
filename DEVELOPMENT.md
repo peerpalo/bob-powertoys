@@ -9,9 +9,12 @@ bob-powertoys/
 │   ├── taskManager.ts            # Task commands, last-task persistence
 │   ├── debugAdapter.ts           # Centralized debug adapter tracker
 │   ├── utils.ts                  # Shared utilities: taskManager access, frame resolution, forceFirstParty
-│   ├── mcpShare.ts               # Shares MCP sessions across workspace roots (see "MCP session sharing")
+│   ├── mcp/
+│   │   ├── share.ts              # Shares MCP sessions across workspace roots (see "MCP session sharing")
+│   │   ├── apps.ts               # Experimental MCP Apps host: ui:// views in a side panel (see "MCP Apps host")
+│   │   └── appBridge.ts         # Browser bundle for the app panel: official AppBridge + relay (built to out/mcp/appBridge.js)
 │   └── tools/                    # Individual tool modules
-│       ├── workspace.ts          # Multi-root workspace tools (11 tools + prompt injection)
+│       ├── workspace.ts          # Multi-root workspace support: list_workspace_folders + sandbox patch + prompt injection + webview patch
 │       ├── videos.ts             # Video frame extraction tools (2 tools)
 │       ├── breakpoints.ts        # Breakpoint management (batch operations)
 │       ├── debugControl.ts       # Debug stepping & control
@@ -99,7 +102,7 @@ registerPowerToys(context, bobExports)
     ├── registerLastTaskSave()                   // wrap webview to intercept setCurrentTasks
     ├── registerDebugAdapterTracker(bobExports)  // DAP event tracking + notifications
     ├── bobExports.registerSource(...)           // register tool source
-    └── register 29 tools
+    └── register 26 tools
     ↓
 Commands registered (independent of Bob):
     ├── bob-powertoys.showStatus
@@ -233,6 +236,47 @@ MCP share: "carbon-mcp" in C:\src\b reuses the session started by C:\src\a (2 ro
 
 ---
 
+## MCP Apps host (experimental)
+
+The host side of the [MCP Apps spec](https://github.com/modelcontextprotocol/ext-apps) (SEP-1865, version `2026-01-26`, extension id `io.modelcontextprotocol/ui`) is implemented on top of **the official SDK** plus Bob's MCP plumbing. Bob has no native support (zero `ui://` / `text/html;profile=mcp-app` occurrences in its bundle; its chat webview is a closed React bundle that cannot host iframes).
+
+The protocol layer is **not** hand-rolled: `AppBridge` from `@modelcontextprotocol/ext-apps/app-bridge` (bundled by `esbuild.js` into `out/mcp/appBridge.js`, entry [`src/mcp/appBridge.ts`](src/mcp/appBridge.ts)) runs inside the panel webview and speaks the full MCP Apps wire protocol (`ui/initialize` handshake, `tool-input`/`tool-result` notifications, request routing, teardown, size changes, `ui/download-file`, `sampling/createMessage`, …). It is constructed without an MCP client (`new AppBridge(null, …)`) so every server interaction can be routed through Bob. [`src/mcp/apps.ts`](src/mcp/apps.ts) is the extension-host half: Bob integration + a thin request/response relay (`acquireVsCodeApi()` postMessages tagged `__bobPtBridge`) between the SDK handlers and Bob's tool instances.
+
+### Spec → implementation map
+
+| Spec requirement | Implementation |
+|---|---|
+| Discovery: tools carry `_meta.ui.resourceUri` (deprecated `_meta["ui/resourceUri"]`) | Bob stores tool definitions verbatim — `tool.getDefinition()` (the `bJ` class in extension.js); `toolUiResourceUri()` reads both formats |
+| Render the `ui://` resource (desktop-host path, no sandbox proxy) | `source.onToolWillExecute` detects the call, fetches the resource via Bob's own `read_mcp_resource` tool; the panel document (`buildAppPanelDocument()`) embeds the config and loads the bundled bridge, which creates the sandboxed iframe (`allow-scripts`, null origin, iframe `csp` attribute) |
+| View ↔ Host JSON-RPC over postMessage | official `AppBridge` + `PostMessageTransport` (bundled in `out/mcp/appBridge.js`); its handlers (`oncalltool`, `onreadresource`, `onopenlink`, `onmessage`, `onupdatemodelcontext`, …) are relayed to the extension host, which answers by proxying to Bob |
+| `ui/notifications/tool-input` after initialize | the bridge reports `initialized`; the extension host replies with a `tool-input` command carrying the arguments captured at `onToolWillExecute` |
+| `ui/notifications/tool-result` | `source.onToolDidExecute(env, toolId, args, {…meta, taskId})` → `readLastToolResult()` reads the task's last `role:'tool'` message → `tool-result` command to the bridge |
+| Proxy `tools/call` to the originating server, enforce `visibility: ["app"]` | `proxyToolCall()` finds the live `bJ` instance (`mcpInfo.serverName`/`toolName`) in the task's tools and calls `tool.call({env, parameters, pushResult, pushError, setMetadata})` — inheriting Bob's restart + elicitation handling; `callableByApp()` enforces visibility |
+| `resources/read` from the View | `callReadMcpResource()` → Bob's `read_mcp_resource` tool (`{server, uri}` parameters), result parsed from the JSON it pushes |
+| `ui/open-link` | `vscode.env.openExternal` (https/http only) |
+| `ui/message` | best-effort `chatManager.handleInputMessage` via `findTaskChatManager` |
+| Host context (theme, display mode, toolInfo) | `ui/initialize` response built from `vscode.window.activeColorTheme`, panel mode, and the tool definition |
+
+### Key Bob internals relied on
+
+- `onToolWillExecute(env, toolId, args)` fires before MCP tool execution and can return `undefined` to let the call proceed — our capture point for tool input.
+- `onToolDidExecute(env, toolId, args, meta)` (`handleToolResult` in extension.js) fires with `{...toolMetadata, taskId}` — our capture point for completion.
+- MCP results are flattened by `runToolWithRestart`: `[...textItems, JSON.stringify(structuredContent)].join('  ')` — `extractStructuredContent()` recovers the structured payload by scanning double-space boundaries from the end.
+- `read_mcp_resource` pushes `JSON.stringify({contents: [{uri, mimeType, text}]})` — the resource HTML is cleanly parseable, but the contents' `_meta` (CSP domains) is dropped.
+
+### Known limitations / TODOs
+
+- **Capability negotiation**: Bob's MCP client does not advertise `io.modelcontextprotocol/ui` during initialize, so strictly conforming servers may omit `_meta.ui`. Servers that always include it (most of the current ecosystem) work. A fix would require patching the session initialize request.
+- **CSP**: the app iframe uses a permissive default CSP because the resource `_meta.ui.csp` is dropped by `read_mcp_resource`. Phase 2: read resources directly on the MCP session (needs session access like mcpShare's) to preserve `_meta`.
+- **`visibility: ["app"]` tools are not hidden from the model** (Bob does not filter them) — we enforce visibility only for View-initiated calls.
+- `ui/update-model-context` is stored but not yet surfaced to the model in the next turn.
+- `ui/notifications/tool-input-partial` and `tool-cancelled` are not sent.
+- One panel per `(taskId, toolId)`; a repeated call replaces the previous panel.
+
+Gated on `bob-powertoys.mcpApps.enabled` (default `false`, read at call time — inert unless an Apps server is configured). Tests: [`test/mcp/apps.test.ts`](test/mcp/apps.test.ts).
+
+---
+
 ## Bob Internal Structures
 
 ### taskManager - key methods
@@ -316,86 +360,23 @@ export function getTaskManager(): any {
 
 ```
 findTaskChatManager(taskId) → chatManager → currentTask → getTools()
-                                                              ↓
-                                                    search by .id here
+                                                ↓
+                                      search by .id here
 ```
 
-`taskId` (`context.env.id`) is **mandatory**. It is used to find the exact chatManager running the current task via `findTaskChatManager`, which checks both active and backgrounded states. Without it, the old approach (`taskManager.mainPanelTask`) always returned the sidebar chatManager — which has no `currentTask` for tab-based tasks — causing lookup failures after context compaction.
+`taskId` (`context.env.id`) is **mandatory** so the lookup is always routed to the exact chatManager running the current task — sidebar or editor tab (`findTaskChatManager` checks both active and backgrounded states; routing via `taskManager.mainPanelTask` instead returns the sidebar chatManager, which has no `currentTask` for tab-based tasks).
 
 Bob stores all active tools in a plain array on the `Task` object. `getBobTool` finds the entry whose `.id` matches `toolId` and returns it, or `null` if the task manager is not ready, the task is not found, or the tool is not present in the current mode.
 
-### Why this is needed
-
-Bob's built-in tools have complex internal implementations (fuzzy diff engine, `execa` shell runner, `DiagnosticDiff` captures, truncation detection, undo entry registration) that live inside the closed Bob bundle. Reimplementing them would be brittle and would silently diverge on every Bob update.
-
-Instead, every workspace tool resolves the live tool object at call-time via `getBobTool(id)` and delegates to its `call()` method, patching only what needs to change in the forwarded context.
-
-### Delegation pattern
-
-All callers follow the same three-step pattern:
-
-1. `resolveInFolder(workspace, '')` → get the secondary folder's absolute `fsPath`
-2. `getBobTool(context.env.id, toolId)` → get the live Bob tool instance for this task
-3. `tool.call({ ...context, env: { ...context.env, workspace: fsPath }, parameters: { /* workspace stripped */ }, ... shims })` → forward
-
-**Context shims** bridge Bob's internal callbacks back to our context:
-
-| Shim | Used by | What it does |
-|---|---|---|
-| `trackFileRead(uri, mtime)` | `read_workspace_file` | Writes into `K.fileMtimes` via `context.setMetadata?.({ fileMtimes: { [uri]: mtime } })` |
-| `pushEdit(uri, { before, after, mtime })` | all edit tools | Writes into `K.changes` and `K.fileMtimes` via `context.setMetadata?.({ changes: { [uri]: ... }, fileMtimes: ... })` |
-
-### Current callers
-
-| Caller | Delegates to | What it patches |
-|---|---|---|
-| `ReadWorkspaceFileTool` | `getBobTool('read_file')` | `env.workspace`, strips `workspace` param, adds `trackFileRead` shim |
-| `ListWorkspaceFilesTool` | `getBobTool('list_files')` | `env.workspace`, strips `workspace` param, retries with absolute path on error |
-| `GlobWorkspaceTool` | `getBobTool('glob')` | `env.workspace` per root (loops for all-folders case), strips `workspace` param |
-| `GrepWorkspaceTool` | `getBobTool('grep')` | `env.workspace` per root (loops for all-folders case), strips `workspace` param, retries with absolute path on error |
-| `WriteWorkspaceFileTool` | `getBobTool('write_file')` | `env.workspace`, strips `workspace` param, adds `pushEdit` shim |
-| `InsertWorkspaceContentTool` | `getBobTool('insert_content')` | `env.workspace`, strips `workspace` param, adds `pushEdit` shim |
-| `SearchAndReplaceWorkspaceTool` | `getBobTool('search_and_replace')` | `env.workspace`, strips `workspace` param, adds `pushEdit` shim |
-| `ApplyDiffWorkspaceTool` | `getBobTool('apply_diff')` | `env.workspace`, strips `workspace` param, adds `pushEdit` shim |
-| `ExecuteWorkspaceCommandTool` | `getBobTool('execute_command')` | `env.workspace` set to resolved `cwd`, strips `workspace` and `cwd` params |
-| `FindSymbolWorkspaceTool` | `getBobTool('FindSymbol')` | `env.workspace`, strips `workspace` param — fixes `getWorkspaceSymbols` and `filter_path` resolution |
-| `FindReferencingSymbolsWorkspaceTool` | `getBobTool('FindReferencingSymbols')` | `env.workspace`, strips `workspace` param — fixes `path.join(env.workspace, relative_path)` resolution |
-| `ReadVideoFileWorkspaceTool` | `new ReadVideoFileTool().call(...)` directly | `env.workspace` — cannot use `getBobTool` here (see note below) |
-
-> **Why `read_workspace_video_file` does not use `getBobTool`**: Bob wraps every registered tool's `call` with a closure that calls `t.getEnvs()` to rebuild `env` from the live task at call time. This means any `env` object you pass in (including your patched `env.workspace`) is silently discarded. For Bob's own built-in tools this is fine — they read `env.workspace` from `t.getEnvs()` which is exactly what the wrapper sets. But `read_video_file` is *our* tool, so calling it through the wrapper would give it the unpatched primary workspace. The fix is to instantiate `ReadVideoFileTool` directly and call its `call()` method, bypassing the wrapper entirely.
-
-> **Subdirectory path handling in `list_workspace_files` and `grep_workspace`**: In newer versions of Bob, delegating `list_files` or `grep` with a relative subdirectory path against secondary workspace folders can fail if the underlying tool requires an absolute path (`path must be an absolute path`). `ListWorkspaceFilesTool` and `GrepWorkspaceTool` attempt execution with the relative path first; if `pushError` is triggered, they automatically fall back and retry using the fully resolved absolute path (`vscode.Uri.joinPath(folder.uri, relPath).fsPath`).
-
-### Key internal objects accessed
-
-| Expression | What it is |
-|---|---|
-| `findTaskChatManager(taskManager, taskId)` | Finds the chatManager by task ID (active or backgrounded) |
-| `chatManager.currentTask` | The active `Task` object |
-| `task.getTools()` | Flat array of all tool instances registered for the current mode |
-| `tool.id` | String identifier matching what Bob exposes as the tool name |
+**Currently unused — kept as a utility.** It is the documented way to reach Bob's live built-in tool instances, e.g. to delegate a call with a patched `env` (`tool.call({ ...context, env: { ...context.env, workspace: otherRoot } })`) as the former `*_workspace` proxy tools did. Note that Bob wraps registered tools with a closure that rebuilds `env` from the live task, so the patched-env trick only works for **built-in** tools, not for tools registered from an extension source.
 
 ---
 
-## registerWebviewToolNamePatch — rich UI for workspace tool results
+## registerWebviewOpenFilePatch — click-to-open for secondary folders
 
-Bob's webview renderer (`chat-*.js`) keys off `toolUsage.signature.name` to decide which rich component to render for a tool result. It hardcodes the built-in names (`"read_file"`, `"list_files"`, `"glob"`, `"grep"`) — tools with any other name fall through to a plain `MarkdownBlock`.
+Bob's webview handler resolves relative paths in `openFile` messages against the primary workspace root, so clicks on secondary-folder file mentions open the wrong file.
 
-`registerWebviewToolNamePatch()` in [`src/tools/workspace.ts`](src/tools/workspace.ts) does two things:
-1. **Name remapping** — intercepts outbound `{ type: "setMessages" }` messages and maps workspace tool names to their built-in equivalents so the rich renderer components (`FileListBlock`, `GrepResultBlock`, `CodeBlock`) are used.
-2. **Click-to-open path resolution** — intercepts inbound `{ type: "openFile" }` messages from the webview and resolves secondary-folder paths to their correct absolute location before Bob's own handler sees them.
-
-### Data flow — outbound (name remapping)
-
-```
-task messages (BobTask.getMessages())
-  └─► D5e.updateMessagesUi()
-        └─► aM.updateMessagesUi(tasks, workspace, getMessagesFn)
-              └─► aM.sendMessage({ type: "setMessages", taskId, messages })
-                    └─► webview HTML → React store → renderer
-```
-
-The messages array inside `{ type: "setMessages" }` contains raw task message objects. Each tool-result message has a `toolUsage.signature.name` field — this is what the renderer reads.
+`registerWebviewOpenFilePatch()` in [`src/tools/workspace.ts`](src/tools/workspace.ts) wraps the `openFile` handler on every webview (current and future, via `cm.ui.setWebview` and the `_chatManagers.push` intercept) and rewrites `./<folderName>/...` paths to their absolute location (`resolveOpenFilePath` from `src/utils.ts`) before Bob's own handler sees them.
 
 ### Data flow — inbound (click-to-open)
 
@@ -407,34 +388,13 @@ user clicks a path link in the chat UI
                     └─► Bob's kH() resolver → vscode.open
 ```
 
-Bob's `kH()` resolver always joins against the primary workspace root, so clicks on secondary-folder paths open the wrong file. `wrapHandler` intercepts the `openFile` message and calls `resolveOpenFilePath` (from `src/utils.ts`) to correct the path before Bob's handler fires.
+Bob's `kH()` resolver always joins against the primary workspace root, so clicks on secondary-folder paths open the wrong file. `wrapHandler` intercepts the `openFile` message and calls `resolveOpenFilePath` to correct the path before Bob's handler fires.
 
 ### Patch strategy
 
-1. **`patchView(view)`** — wraps `view.sendMessage` on a single `aM` (webview) instance. Intercepts `{ type: "setMessages" }`, maps each message's `toolUsage.signature.name` through `NAME_MAP`, and forwards the (possibly mutated) message object to the original. Also wraps `view.onMessage` so the `openFile` handler is replaced with `wrapHandler(originalHandler)`.
-
+1. **`patchView(view)`** — wraps `view.onMessage` on a single `aM` (webview) instance so the `openFile` handler is replaced with `wrapHandler(originalHandler)`.
 2. **`patchChatManager(cm)`** — runs `patchView` on any view already assigned to `cm.ui`, then wraps `cm.ui.setWebview()` so every future view assignment is also patched immediately.
-
 3. **`_chatManagers.push` intercept** — catches chatManagers created after extension activation.
-
-4. **`wrapHandler(handler)`** — returns a new handler that calls `resolveOpenFilePath` on `openFile` messages, then delegates to the original handler.
-
-### NAME_MAP
-
-| Workspace tool | Renders as |
-|---|---|
-| `read_workspace_file` | `read_file` (CodeBlock) |
-| `list_workspace_files` | `list_files` (FileListBlock) |
-| `glob_workspace` | `glob` (FileListBlock) |
-| `grep_workspace` | `grep` (GrepResultBlock) |
-
-Edit tools (`write_workspace_file`, etc.) already get `DiffView` via `_meta.changes.patch` set by the `pushEdit` shim — no name remapping needed for them.
-
-### absolutiseToolContent — correct paths in FileListBlock / GrepResultBlock
-
-`FileListBlock` and `GrepResultBlock` render paths as clickable links using the raw text emitted by Bob's `formatOutput` / `formatFilesOutput`. Those functions write *relative* paths (via `path.relative(workspaceRoot, absPath)`), so links for secondary-folder tools point to the wrong location.
-
-The `pushResult` wrappers in `glob_workspace` and `grep_workspace` call `absolutiseToolContent(content, 'glob'|'grep', workspaceRoot)` (from `src/utils.ts`) to rewrite relative paths to absolute before the result is stored, so the rendered links are always correct regardless of which folder was searched.
 
 ---
 
@@ -503,7 +463,7 @@ source.onTurnStart((taskId: string, _envs: any, isEmpty: boolean) => {
 | Condition | Reason |
 |---|---|
 | `isEmpty === true` | `onTurnStart` fires on every turn, including resume turns on an already-started task. `isEmpty` is `true` only when the task has **no prior messages** - i.e. the very first user message in a brand-new task. That's the only turn where the system message is freshly built and our injection needs to be added. |
-| `workspaceToolsActive()` | Same gate as the workspace tools themselves (`isMultiRoot() && isAreaEnabled('Workspace')`). Injection is only meaningful in multi-root workspaces, and must not advertise tools that are hidden because the Workspace area is off. Evaluated on every `onTurnStart`, so toggling the setting needs no reload. |
+| `isMultiRoot()` | Same gate as the sandbox patch and `list_workspace_folders`. Injection is only meaningful in multi-root workspaces. Evaluated on every `onTurnStart`, so adding a folder takes effect on the next turn. |
 | `systemMessage.role === 'system'` | Guard against `messages` existing but not yet having a system entry |
 
 ### What was tried and why the alternatives failed
@@ -518,75 +478,57 @@ source.onTurnStart((taskId: string, _envs: any, isEmpty: boolean) => {
 
 ---
 
-## Built-in Tool Redirect Guard
+## Multi-root Sandbox Patch
 
 ### Problem
 
-Bob's sandbox setting **Allow outside workspace tool requests** (`outsideWorkspaceAllowed`) has two modes:
+Bob decides whether a tool call works "outside the workspace" before every call (`sCr()` in `extension.js`):
 
-| Setting | Behaviour |
+1. It builds the tool's parameter schema via **`tool.getParameters(env)`** and collects the values of every parameter tagged `usage: "filePath"` (`read_file` / `write_file` / `list_files` / `glob` / `grep` / `insert_content` / `search_and_replace` / `apply_diff` tag `path`; `execute_command` tags `cwd`).
+2. Each value is resolved against **`env.workspace` — always the PRIMARY workspace root** (`wi()` prefix check, with `~/.bob` and the terminal-history tmp dir as exceptions).
+3. Any path under a secondary folder is flagged `isOutsideWorkspace: true`.
+
+That flag then drives Bob's approval pipeline:
+
+| State | Behaviour |
 |---|---|
-| **OFF** | Bob rejects any built-in tool call whose path is outside the primary workspace root, returning a clear sandbox error. The model reads the error and self-corrects to `read_workspace_file`. |
-| **ON** | Bob passes sandbox validation silently. The built-in tool (`read_file`, etc.) resolves the path against the primary root, either reading the wrong file or producing a confusing OS-level "not found" error. The model does not learn to switch tools. |
+| `outsideWorkspaceAllowed` **OFF** | `validateToolExecution()` hard-blocks the call: *"Tools are blocked from working outside of the current workspace…"* |
+| `outsideWorkspaceAllowed` **ON** | Sandbox passes, but `requiresExplicitApproval()` still demands a prompt unless the per-group `permissionOptions[].enableOutsideWorkspace` flag (the newer *auto-approve reading files outside workspace* setting) is on. |
 
-This makes correct behaviour dependent on a user setting the model can't observe.
+A secondary workspace folder is part of the workspace the user opened — neither state is correct for it. And since our `source.onToolWillExecute` hook fires **before** the sandbox check but can only *cancel* a call (it cannot suppress the prompt), the only way to make built-ins prompt-free on secondary folders is to stop Bob from tagging those calls in the first place.
 
 ### Solution
 
-[`registerBuiltinToolRedirectGuard()`](src/tools/workspace.ts) registers a `source.onToolWillExecute` hook that fires **before** Bob's sandbox check. When any sandboxed built-in tool is called with a path that resolves inside a secondary workspace folder, the hook cancels the call and returns an explicit, actionable error message — regardless of the `outsideWorkspaceAllowed` setting.
+[`src/tools/workspace.ts`](src/tools/workspace.ts) (multi-root sandbox patch) makes Bob's own check workspace-aware with two prototype wraps, installed lazily from `source.onTurnStart` (the turn's task and its tools exist by then, and the wraps are in place before the turn's first tool call):
 
-### `onToolWillExecute` hook
+1. **`Task.recordToolCallArguments(toolCall)`** — called synchronously at the start of every tool call, *before* `sCr()` runs — is wrapped to stash the call's arguments keyed by task id (`env.id`).
+2. **The built-in file tools' `getParameters(env)`** is wrapped: when every `filePath`-tagged argument of the pending call resolves inside one of the workspace folders (and none inside `~/.bob`), the `usage: "filePath"` tag is dropped from the returned descriptors for that call. `sCr()` then sees no file paths, computes `isOutsideWorkspace: false`, and the call behaves exactly like a primary-folder path: **no block, no prompt, Bob's flags irrelevant**. Paths genuinely outside every folder keep their tags, so Bob's native behavior (block / prompt / auto-approve per the user's flags) is unchanged.
 
-Confirmed from Bob internals (`extension.js`):
+A third wrap on the same tools' **`call()`** rewrites `folderName/...`-style relative paths to absolute paths inside that folder — but only when the path does not exist under the primary root *and* the rewritten path exists on disk, and only for native calls (`env.workspace` = primary root). This lets the model address secondary folders naturally, e.g. `read_file("backend/src/app.ts")`.
 
-```
-async onToolCallHandler(source, toolOwner, toolCall):
-  toolId = toolCall.signature.name
-  result = await Registry.onToolWillExecute(manager.getEnvs(), toolId, toolCall.signature.arguments)
-  if result === true || result?.cancel === true → abort
-  if result is object without cancel → treat as override context
-  ... proceed to sandbox validation
-```
+The symbol tools (`FindSymbol` / `FindReferencingSymbols`) get the same `call()` wrap for their path parameters (`filter_path` / `relative_path`) — plus, when a path resolves inside a secondary folder, the forwarded context's **`env.workspace` is scoped to that folder**, because those tools hardwire the workspace root for the language-server query and path resolution. Their parameters are not `filePath`-tagged, so they need no `getParameters` wrap.
 
-Callback signature:
+Both wraps are generic (they resolve `this.id` at call time), so one prototype wrap per tool class covers every past and future instance; re-running on later turns catches tools exposed by modes that were not active earlier. Wrappers are tagged (`__bobPtSandboxPatch`) and installs are idempotent.
 
-```typescript
-source.onToolWillExecute(
-  (env: any, toolId: string, args: Record<string, any>) =>
-    { cancel: true; message: string; note: string } | undefined
-)
-```
+### Decision logic
 
-Returning `{ cancel: true, note }` aborts execution before the sandbox runs. Bob surfaces the `note` field to the model as part of the cancellation message (`Tool call to <tool> was cancelled: <note>`). Both `note` and `message` are provided for compatibility.
+The pure functions `shouldStripFilePathUsage(params, args, env, folders)`, `resolveLikeBob()`, `isInsideDir()` and `rewriteSecondaryRelativePath()` are exported for testability (see [`test/workspace-sandbox.test.ts`](test/workspace-sandbox.test.ts)):
 
-### `BUILTIN_REDIRECTS` map
-
-Defined once in [`src/tools/workspace.ts`](src/tools/workspace.ts) and used by both the guard and `buildInjection` (the system-prompt text):
-
-```typescript
-const BUILTIN_REDIRECTS: Record<string, { replacement: string; pathParam: string }> = {
-  read_file:          { replacement: 'read_workspace_file',          pathParam: 'path' },
-  write_file:         { replacement: 'write_workspace_file',         pathParam: 'path' },
-  // ... (all sandboxed builtins, including read_video_file → pathParam: 'video_path')
-  execute_command:    { replacement: 'execute_workspace_command',    pathParam: 'cwd' },
-};
-```
-
-`execute_command` uses `cwd` as the path parameter because that is what determines which folder a shell command runs in. `read_video_file` uses `video_path`.
-
-### Path resolution
-
-Relative paths are resolved against the primary workspace root (matching how Bob's built-in tools would resolve them). Absolute paths are used as-is. A path matches a secondary folder only when it equals the folder's `fsPath` exactly, or starts with `fsPath + path.sep` — preventing false matches against folders whose names share a common prefix (e.g. `/src/backend` must not match `/src/backend-v2`).
+- Paths resolve exactly like Bob's `vs()`: a leading `~` expands to the home directory, then `path.resolve(env.workspace, value)`.
+- The strip only fires when **every** provided `filePath` value is inside a workspace folder; any genuinely-outside value keeps the whole call native.
+- Paths inside `~/.bob` never strip, so Bob's `isBobHomeWrite` protection stays intact.
+- Directory containment is case-insensitive on Windows and requires `fsPath + path.sep` prefix (no `/src/backend` vs `/src/backend-v2` collisions).
 
 ### Gating
 
-The guard returns `undefined` (no cancel) unless `workspaceToolsActive()` is true. When the Workspace area is off or the workspace is single-root, the replacement `*_workspace_*` tools are hidden from the model, so redirecting to them would leave it with no way to read the file. The check runs on every call, not at registration.
+All wraps check `isMultiRoot()` **at call time**, so adding a folder takes effect on the next turn with no reload. In single-root workspaces the wraps are pass-through and Bob behaves exactly as stock.
 
-### Testability
+### Caveats
 
-The VS Code–dependent folder lookup is isolated to the thin `registerBuiltinToolRedirectGuard` wrapper. The pure detection logic lives in the exported [`checkBuiltinToolRedirect(toolId, args, folders)`](src/tools/workspace.ts) function, which takes the folders array as a parameter and has no VS Code dependency. See [`test/builtin-redirect-guard.test.ts`](test/builtin-redirect-guard.test.ts).
+- Mode `fileRegex` restrictions and the `isBobHomeWrite` flag are driven by the same `filePath`-tagged values; while a strip is active for a call, those checks see no paths. Home-write is protected explicitly (see above); mode file-regex restrictions are skipped for in-workspace secondary-folder paths (niche, accepted).
+- Depends on Bob internals: `recordToolCallArguments` on the Task prototype, class-method `getParameters` on the built-in tools, `env.id` being the task id. If the shapes change, the wraps are never installed (or become pass-through) and Bob falls back to its native single-root behavior — logged as a warning.
 
-The gating is covered by [`test/workspace-gating.test.ts`](test/workspace-gating.test.ts), which calls `registerWorkspaceTools(fakeSource)` and drives the captured `onTurnStart` / `onToolWillExecute` callbacks against the vscode mock.
+The install path is covered by [`test/workspace-gating.test.ts`](test/workspace-gating.test.ts), which drives the captured `onTurnStart` callback against fake task/tool classes and verifies both the strip (active) and the pass-through (area off).
 
 ---
 
@@ -760,8 +702,7 @@ Enable or disable entire groups of tools. All default to `true`. Changes take ef
 | `bob-powertoys.tools.debug.enabled` | All 18 debug and breakpoint tools |
 | `bob-powertoys.tools.debug.breakpointNotifications` | Breakpoint hit notification mode (`disabled`, `bobOnly`, `all`) |
 | `bob-powertoys.tools.terminal.enabled` | 4 terminal tools |
-| `bob-powertoys.tools.workspace.enabled` | 13 multi-root workspace tools, the system-prompt injection and the built-in tool redirect guard (all gated on `workspaceToolsActive()`, i.e. also `isMultiRoot()`) |
-| `bob-powertoys.tools.video.enabled` | `read_video_file` + `read_workspace_video_file` (latter also gated on `workspaceToolsActive()`) |
+| `bob-powertoys.tools.video.enabled` | `read_video_file` (multi-root native: resolves secondary-folder paths itself) |
 | `bob-powertoys.tools.extensions.enabled` | `list_extensions` |
 
 Read at call time via `isAreaEnabled(area)` in each tool's `enabled()` method — no registration-time gating, so no restart is needed.
@@ -850,10 +791,9 @@ forceFirstParty(source: any, id: string): boolean   // re-enables our source on 
 registerTaskManager(bobExports: any): Promise<void> // resolves + caches, with retries
 getTaskManager(): any                               // returns cached instance
 findTaskChatManager(taskManager, taskId): any|null  // active + backgrounded lookup
-getBobTool(taskId: string, toolId: string): any | null  // resolves a Bob built-in tool for the given task (context.env.id)
+getBobTool(taskId: string, toolId: string): any | null  // resolves a Bob built-in tool for the given task (context.env.id); currently unused, kept as a utility
 resolveFrameId(frameId, resolveTopFrame): Promise<number|undefined>
 normaliseWorkspacePath(filePath: string): string    // normalises user-supplied relative paths for vscode.Uri.joinPath
-absolutiseToolContent(content, tool, workspaceRoot): string  // absolutises relative paths in glob/grep tool output
 resolveOpenFilePath(filePath, folders): string      // resolves ./folderName/... webview click paths to absolute
 isAreaEnabled(area: string): boolean                // reads bob-powertoys.tools.{area}.enabled from VS Code config; default true
 ```
@@ -922,8 +862,7 @@ class MyTool {
 
 | File | Tools | Count | Area setting |
 |---|---|---|---|
-| `workspace.ts` | `list_workspace_folders`, `read_workspace_file`, `write_workspace_file`, `list_workspace_files`, `glob_workspace`, `grep_workspace`, `insert_workspace_content`, `search_and_replace_workspace`, `apply_diff_workspace`, `execute_workspace_command`, `find_symbol_workspace`, `find_referencing_symbols_workspace` | 12 | `workspaceToolsActive()` (`bob-powertoys.tools.workspace.enabled` + `isMultiRoot()`) |
-| `workspace.ts` | `read_workspace_video_file` | 1 | `workspaceToolsActive()` + `bob-powertoys.tools.video.enabled` |
+| `workspace.ts` | `list_workspace_folders` | 1 | `isMultiRoot()` |
 | `videos.ts` | `read_video_file` | 1 | `bob-powertoys.tools.video.enabled` |
 | `breakpoints.ts` | `set_breakpoints`, `remove_breakpoints`, `list_breakpoints` | 3 | `bob-powertoys.tools.debug.enabled` |
 | `debugControl.ts` | `step_over`, `step_into`, `step_out`, `continue`, `pause` | 5 | `bob-powertoys.tools.debug.enabled` |
@@ -932,11 +871,11 @@ class MyTool {
 | `terminalConsole.ts` | `list_terminals`, `get_terminal_output`, `search_terminal_output`, `focus_terminal` | 4 | `bob-powertoys.tools.terminal.enabled` |
 | `bobExtensions.ts` | `list_extensions` | 1 | `bob-powertoys.tools.extensions.enabled` |
 | `universeAnswer.ts` | `universe_answer` | 1 | always on |
-| **Total** | | **38** | 25 active in single-root, 38 in multi-root |
+| **Total** | | **26** | 25 active in single-root, 26 in multi-root |
 
 ---
 
-## Complete Tool Reference (38 Tools)
+## Complete Tool Reference (26 Tools)
 
 ### Breakpoint Tools (3)
 | Tool | Description |
@@ -980,33 +919,21 @@ class MyTool {
 | `search_terminal_output` | Search terminal output for a pattern |
 | `focus_terminal` | Focus a specific terminal |
 
-### Multi-Root Workspace Tools (11)
+### Multi-Root Workspace Tools (1)
 
 > **Visibility**: These tools are only active in multi-root VS Code workspaces (2+ root folders).
 > They are completely hidden from the LLM in single-root workspaces via the `enabled()` method.
+> The built-in file tools also work on every workspace folder natively — see [Multi-root Sandbox Patch](#multi-root-sandbox-patch).
 
 | Tool | Description |
 |---|---|
 | `list_workspace_folders` | List all root folders - call this first to discover folder names |
-| `read_workspace_file` | Read a file in any workspace folder (replaces `read_file` for non-primary folders) |
-| `write_workspace_file` | Write/create a file in any workspace folder (replaces `write_file` for non-primary folders) |
-| `list_workspace_files` | Browse a directory in any workspace folder (replaces `list_files`) |
-| `glob_workspace` | Find files by glob pattern in any workspace folder (replaces `glob`) |
-| `grep_workspace` | Search file contents by regex in any workspace folder (replaces `grep`) |
-| `insert_workspace_content` | Insert lines at a specific position in a file in any workspace folder (replaces `insert_content`) |
-| `search_and_replace_workspace` | Find-and-replace text (literal or regex) in a file in any workspace folder (replaces `search_and_replace`) |
-| `apply_diff_workspace` | Apply a SEARCH/REPLACE diff block to a file in any workspace folder using Bob's fuzzy diff engine (replaces `apply_diff`) |
-| `execute_workspace_command` | Run a CLI command with its working directory in any workspace folder (replaces `execute_command` for non-primary folders) |
-| `find_symbol_workspace` | Find symbols by name/path pattern in any workspace folder (replaces `FindSymbol` for non-primary folders) |
-| `find_referencing_symbols_workspace` | Find references to a symbol in any workspace folder (replaces `FindReferencingSymbols` for non-primary folders) |
-| `read_workspace_video_file` | Extract video frames from any workspace folder (replaces `read_video_file` for non-primary folders) |
-
-Tools `list_workspace_folders` through `execute_workspace_command` delegate entirely to the corresponding Bob built-in via `getBobTool`, inheriting output format, error messages, undo tracking, and future improvements automatically. `read_workspace_video_file` is different: it calls `new ReadVideoFileTool().call(...)` directly instead of going through `getBobTool`, because Bob wraps registered tools and re-injects `env` from the live task at call time — which would discard the patched `env.workspace`. See **Delegation pattern** below.
+The built-in tools (including `FindSymbol` / `FindReferencingSymbols` via the sandbox patch's `call()` rewrite and `env.workspace` scoping) handle secondary folders natively — see [Multi-root Sandbox Patch](#multi-root-sandbox-patch).
 
 ### Video Analysis Tools (1)
 | Tool | Description |
 |---|---|
-| `read_video_file` | Extract frames from a video file using ffmpeg for visual analysis. Evenly-spaced by default; supports custom `-vf` filters and `-ss` seek. Requires ffmpeg on PATH. |
+| `read_video_file` | Extract frames from a video file using ffmpeg for visual analysis. Evenly-spaced by default; supports custom `-vf` filters and `-ss` seek. Works on every workspace folder (absolute path, or relative path starting with a secondary folder name). Requires ffmpeg on PATH. |
 
 ### Bob Extensions (1)
 | Tool | Description |
@@ -1227,14 +1154,6 @@ Bob evaluates `enabled?.(env) ?? true` at tool-list build time. A tool returning
 ---
 
 ## Troubleshooting
-
-### Workspace proxy tools fail after context compaction (`read_file tool not found`)
-
-Symptom: `read_workspace_file` (and other `*_workspace` tools) return `"read_file tool not found in current task"` after the conversation has been running for a while. The calls complete in 1–3 ms (no I/O — pure lookup failure).
-
-Cause: This happened when `getBobTool` navigated via `taskManager.mainPanelTask` (the sidebar chatManager). Tasks running in editor tabs (`isPanel === true`) have a different chatManager — the sidebar one has no `currentTask` for them. After context compaction the model switches from calling `read_file` directly to calling `read_workspace_file`, which hit this broken lookup path.
-
-Fix (current): `getBobTool` now takes a mandatory `taskId` parameter and routes via `findTaskChatManager(taskManager, taskId)`, which finds the correct chatManager regardless of whether the task is in the sidebar or a tab.
 
 ### taskManager is null on startup
 `extractTaskManager` can return null if Bob's chat panel hasn't rendered yet when `setChatContent` is called. `registerTaskManager` automatically retries up to 3 times with 1s delays. If it still fails after 3 attempts, the status bar shows an error icon and breakpoint notifications are disabled - but all other tools still work.

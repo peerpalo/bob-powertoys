@@ -1,4 +1,4 @@
-import { logger } from './utils.js';
+import { logger } from '../utils.js';
 
 /**
  * Share one MCP session across workspace roots.

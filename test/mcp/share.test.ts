@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterAll } from 'vitest';
-import { shareClient, installMcpShare } from '../src/mcpShare.js';
-import { logger } from '../src/utils.js';
+import { shareClient, installMcpShare } from '../../src/mcp/share.js';
+import { logger } from '../../src/utils.js';
 
 // Fake MCPClient: createSession(name, false) returns an uninitialized session
 // (as Bob does); initialize() is what actually "connects".

@@ -2,7 +2,7 @@
   "name": "bob-powertoys",
   "displayName": "PowerToys for Bob",
   "description": "Enhanced development tools for IBM Bob: debugging, terminal access, multi-root workspace support, and quality-of-life improvements.",
-  "version": "0.9.1",
+  "version": "0.10.0",
   "icon": "assets/icon.png",
   "license": "MIT",
   "publisher": "peerpalo",
@@ -104,23 +104,23 @@
           "default": true,
           "markdownDescription": "Enable the **terminal** tools. Changes take effect on the next Bob turn."
         },
-        "bob-powertoys.tools.workspace.enabled": {
-          "order": 4,
-          "type": "boolean",
-          "default": true,
-          "markdownDescription": "Enable the **multi-root workspace** tools (only active in workspaces with 2+ root folders). Changes take effect on the next Bob turn."
-        },
         "bob-powertoys.tools.video.enabled": {
-          "order": 5,
+          "order": 4,
           "type": "boolean",
           "default": true,
           "markdownDescription": "Enable the **video analysis** tools. Requires ffmpeg on PATH. Changes take effect on the next Bob turn."
         },
         "bob-powertoys.tools.extensions.enabled": {
-          "order": 6,
+          "order": 5,
           "type": "boolean",
           "default": true,
           "markdownDescription": "Enable the **extensions** tool. Changes take effect on the next Bob turn."
+        },
+        "bob-powertoys.mcpApps.enabled": {
+          "order": 6,
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "Experimental: act as an **MCP Apps** host. When a tool from an MCP server declares a `ui://` resource, its interactive UI opens in a side panel instead of being discarded. Changes take effect on the next Bob turn."
         }
       }
     }
@@ -147,6 +147,7 @@
     "vitest": "^4.1.11"
   },
   "dependencies": {
+    "@modelcontextprotocol/ext-apps": "^2.0.4",
     "diff": "^9.0.0"
   },
   "allowScripts": {
