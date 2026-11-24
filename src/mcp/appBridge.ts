@@ -75,6 +75,9 @@ function relayStart(config: BridgeConfig): void {
   const bridge = new AppBridge(null, config.hostInfo, config.capabilities as any, { hostContext: config.hostContext as any });
 
   window.addEventListener('message', (event: MessageEvent) => {
+    // Only accept messages from the extension host (parent), not from the
+    // sandboxed View iframe (which uses its own PostMessageTransport channel).
+    if (event.source === frame.contentWindow) { return; }
     const data = event.data as RelayMessage;
     if (!data || data.__bobPtBridge !== true) { return; }
 

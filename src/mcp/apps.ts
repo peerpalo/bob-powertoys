@@ -57,6 +57,11 @@ const VIEW_IFRAME_SANDBOX = 'allow-scripts allow-forms allow-popups allow-modals
  * `ui.csp` metadata once we can read `_meta` (needs direct session access —
  * Bob's read_mcp_resource drops it).
  */
+// Network sources (https:/wss:) are kept so apps can load scripts, styles and
+// assets from CDNs and connect to their own backends. form-action is locked to
+// 'none' so a rogue app can't silently POST data out via an HTML form.
+// TODO(phase 2): narrow connect-src to explicit connectDomains declared by the
+// server once _meta is readable (tracked in DEVELOPMENT.md).
 const VIEW_IFRAME_CSP = [
   "default-src 'none'",
   "script-src 'unsafe-inline' 'unsafe-eval' https: blob:",
@@ -68,6 +73,7 @@ const VIEW_IFRAME_CSP = [
   'connect-src https: wss:',
   'frame-src https:',
   "object-src 'none'",
+  "form-action 'none'",
   "base-uri 'self'",
 ].join('; ');
 
@@ -147,6 +153,8 @@ export interface BridgeConfig {
   hostContext: Record<string, unknown>;
   sandbox: string;
   csp: string;
+  /** webview.cspSource value for the host document's script-src. */
+  webviewCspSource: string;
 }
 
 /**
@@ -157,13 +165,35 @@ export interface BridgeConfig {
  * `webview.asWebviewUri()` by the caller). Everything protocol-related is
  * handled by the SDK; this document only bootstraps it.
  */
+// Host document CSP. The host document itself makes no network calls, but the
+// View iframe (srcdoc) inherits this policy before its own `csp` attribute
+// further restricts it — so network sources must be at least as permissive as
+// VIEW_IFRAME_CSP, otherwise the parent policy clamps the child.
+// script-src is locked to the webview origin + 'unsafe-inline' (needed for the
+// window.__MCP_APPS_CONFIG inline block); no https: wildcard for scripts here.
+const HOST_DOCUMENT_CSP = (webviewCspSource: string) => [
+  `default-src 'none'`,
+  // 'unsafe-inline' is required for the window.__MCP_APPS_CONFIG inline script block.
+  `script-src 'unsafe-inline' ${webviewCspSource}`,
+  `style-src 'unsafe-inline' https: data:`,
+  `img-src https: data: blob:`,
+  `font-src https: data:`,
+  `media-src https: data: blob:`,
+  `connect-src https: wss:`,
+  `worker-src blob: https:`,
+  `frame-src https:`,
+  `object-src 'none'`,
+  `form-action 'none'`,
+  `base-uri 'none'`,
+].join('; ');
+
 export function buildAppPanelDocument(config: BridgeConfig, bridgeScriptSrc: string, title: string): string {
   return `<!DOCTYPE html>
 <html>
 <head>
 <meta charset="utf-8">
 <title>${escapeHtmlAttr(title)}</title>
-<meta http-equiv="Content-Security-Policy" content="${escapeHtmlAttr(VIEW_IFRAME_CSP)}">
+<meta http-equiv="Content-Security-Policy" content="${escapeHtmlAttr(HOST_DOCUMENT_CSP(config.webviewCspSource))}">
 <style>
   html, body { margin: 0; padding: 0; height: 100%; background: var(--vscode-editor-background, #fff); }
 </style>
@@ -247,23 +277,32 @@ function normalizeArgs(args: unknown): Record<string, any> {
  * @param extensionUri  Needed to resolve the bundled bridge script.
  */
 export function registerMcpApps(source: any, extensionUri: vscode.Uri): void {
-  source.onToolWillExecute((env: any, toolId: string, args: Record<string, any>) => {
+  source.onToolWillExecute((env: any, toolId: string, _args: Record<string, any>) => {
     if (!mcpAppsEnabled()) { return; }
     // A new call of the same tool supersedes any stale buffered result.
     pendingResults.delete(appKey(env?.id, toolId));
     if (toolId.startsWith('mcp__')) {
-      logger.log(`MCP Apps: will-execute ${toolId} args=${safeJson(args, 500)}`);
+      logger.log(`MCP Apps: will-execute ${toolId}`);
     }
-    maybeOpenApp(env, toolId, args, extensionUri).catch((e) => {
-      logger.warn('MCP Apps: failed to handle tool call', e);
-    });
-    // Always return undefined so the tool call proceeds normally.
+    // Panel is opened only after approval+execution (onToolDidExecute below).
   });
 
   source.onToolDidExecute((env: any, toolId: string, args: Record<string, any>, meta: any) => {
     if (!mcpAppsEnabled()) { return; }
-    deliverToolResult(env, toolId, args, meta).catch((e) => {
-      logger.warn('MCP Apps: failed to deliver tool result', e);
+    // Check for cancellation first. If the user rejected the tool call Bob
+    // never reached the MCP server, so we must not open the panel.
+    // deliverToolResult returns true when the call was cancelled.
+    deliverToolResult(env, toolId, args, meta).then((cancelled) => {
+      if (cancelled) { return; }
+      // Open the panel then re-deliver (deliverToolResult already buffered the
+      // result if the panel isn't ready yet, so the second call is a no-op for
+      // any app that opened quickly; for the common case where the panel is
+      // new, the result is buffered and flushed when the View initialises).
+      maybeOpenApp(env, toolId, args, extensionUri).catch((e) => {
+        logger.warn('MCP Apps: failed to open app panel', e);
+      });
+    }).catch((e) => {
+      logger.warn('MCP Apps: failed to handle tool result', e);
     });
   });
 }
@@ -338,6 +377,7 @@ function openAppPanel(app: McpApp, appHtml: string, extensionUri: vscode.Uri): v
     },
     sandbox: VIEW_IFRAME_SANDBOX,
     csp: VIEW_IFRAME_CSP,
+    webviewCspSource: panel.webview.cspSource,
   };
   const bridgeScript = panel.webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, 'out', 'mcp', 'appBridge.js'));
   panel.webview.html = buildAppPanelDocument(config, bridgeScript.toString(), title);
@@ -396,14 +436,20 @@ async function handleRelayRequest(app: McpApp, method: string, params: any): Pro
     }
 
     case 'resources/list':
-      return callResourceListTool(app.env, 'list_mcp_resources');
+      return callResourceListTool(app.env, 'list_mcp_resources', app.serverName);
 
     case 'resources/templates/list':
-      return callResourceListTool(app.env, 'list_mcp_resource_templates');
+      return callResourceListTool(app.env, 'list_mcp_resource_templates', app.serverName);
 
     case 'open-link': {
       const url = params?.url;
       if (typeof url !== 'string' || !/^https?:\/\//i.test(url)) { throw new Error('Invalid URL'); }
+      const answer = await vscode.window.showInformationMessage(
+        `The MCP app "${app.toolName}" wants to open:\n${url}`,
+        { modal: true },
+        'Open',
+      );
+      if (answer !== 'Open') { throw new Error('User declined to open the link'); }
       await vscode.env.openExternal(vscode.Uri.parse(url));
       return {};
     }
@@ -467,13 +513,17 @@ function handleRelayNotify(app: McpApp, method: string, params: any): void {
  * the ui:// resource is still being fetched) the result is buffered and sent
  * when the View reports `initialized`.
  */
-async function deliverToolResult(env: any, toolId: string, args: Record<string, any>, meta: any): Promise<void> {
+/**
+ * Returns true if the tool call was cancelled (user rejected), false otherwise.
+ * When false, the result has been buffered or sent to the View.
+ */
+async function deliverToolResult(env: any, toolId: string, args: Record<string, any>, meta: any): Promise<boolean> {
   const taskId = meta?.taskId ?? env?.id;
   const key = appKey(taskId, toolId);
 
   // Only tools that declare a ui:// resource are relevant (avoid buffering everything).
   const bobTool = getBobTool(taskId, toolId);
-  if (!toolUiResourceUri(bobTool?.getDefinition?.())) { return; }
+  if (!toolUiResourceUri(bobTool?.getDefinition?.())) { return false; }
 
   const send = (params: { content: unknown[]; structuredContent?: unknown }) => {
     const app = activeApps.get(key);
@@ -485,25 +535,33 @@ async function deliverToolResult(env: any, toolId: string, args: Record<string, 
   };
 
   // Preferred: the raw MCP result (structuredContent and _meta intact).
+  // A cancelled call never reaches the MCP server, so there is no raw result.
   const raw = takeRawFor(bobTool, args);
   if (raw) {
     logger.log(`MCP Apps: raw tool result for ${key}: structuredContent ${raw.structuredContent !== undefined ? 'present' : 'absent'}`);
     send(rawToParams(raw));
-    return;
+    return false;
   }
 
   // Fallback: Bob's flattened text. The tool message may not be in the chat history yet when the hook fires.
-  let text: string | undefined;
+  let msg: { content: string; isError: boolean } | undefined;
   for (let attempt = 0; attempt < RESULT_LOOKUP_ATTEMPTS; attempt++) {
-    text = readLastToolResult(taskId, toolId);
-    if (text !== undefined) { break; }
+    msg = readLastToolMessage(taskId, toolId);
+    if (msg !== undefined) { break; }
     await new Promise((resolve) => setTimeout(resolve, RESULT_LOOKUP_DELAY_MS));
   }
-  if (text === undefined) {
+  if (msg === undefined) {
     logger.warn(`MCP Apps: no tool result found in chat history for ${key}`);
-    return;
+    return false;
   }
 
+  // Bob marks rejected tool calls as isError in the tool message signature.
+  if (msg.isError) {
+    logger.log(`MCP Apps: tool call ${key} was rejected/errored (isError=true), not opening panel`);
+    return true;
+  }
+
+  const { content: text } = msg;
   const structuredContent = extractStructuredContent(text);
   logger.log(
     `MCP Apps: tool result for ${key}: ${text.length} chars, ` +
@@ -515,6 +573,7 @@ async function deliverToolResult(env: any, toolId: string, args: Record<string, 
     content: [{ type: 'text', text }],
     ...(structuredContent !== undefined && { structuredContent }),
   });
+  return false;
 }
 
 function takeRawFor(tool: any, args: unknown): any {
@@ -538,14 +597,14 @@ function rawToParams(raw: any): { content: unknown[]; structuredContent?: unknow
  * Bob flattens MCP results to text (see module header), so this is the same
  * string the model sees.
  */
-function readLastToolResult(taskId: string, toolId: string): string | undefined {
+function readLastToolMessage(taskId: string, toolId: string): { content: string; isError: boolean } | undefined {
   const tm = getTaskManager();
   const cm = tm ? findTaskChatManager(tm, taskId) : null;
   const messages = cm?.currentTask?.getMessages?.() ?? [];
   for (let i = messages.length - 1; i >= 0; i--) {
     const m = messages[i];
     if (m?.role === 'tool' && m?.toolUsage?.signature?.name === toolId && typeof m.content === 'string') {
-      return m.content;
+      return { content: m.content, isError: m.toolUsage?.signature?.isError === true };
     }
   }
   return undefined;
@@ -570,10 +629,10 @@ async function callReadMcpResource(env: any, serverName: string, uri: string): P
  * Call Bob's `list_mcp_resources` / `list_mcp_resource_templates` tools
  * scoped to the app's server. Returns the parsed JSON result.
  */
-async function callResourceListTool(env: any, toolId: 'list_mcp_resources' | 'list_mcp_resource_templates'): Promise<any> {
+async function callResourceListTool(env: any, toolId: 'list_mcp_resources' | 'list_mcp_resource_templates', serverName: string): Promise<any> {
   const tool = getBobTool(env?.id, toolId);
   if (!tool) { throw new Error(`${toolId} tool not found in current task`); }
-  return (await callToolForJson(tool, env, {})) ?? { resources: [] };
+  return (await callToolForJson(tool, env, { server: serverName })) ?? { resources: [] };
 }
 
 /** Call a Bob MCP tool whose result is JSON, collecting and parsing it. */
