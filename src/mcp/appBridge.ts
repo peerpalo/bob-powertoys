@@ -71,7 +71,8 @@ function relayStart(config: BridgeConfig): void {
     });
   }
 
-  const bridge = new AppBridge(null, config.hostInfo, config.capabilities as any);
+  // hostContext goes in the constructor: setHostContext() before connect() would try to notify a not-yet-connected View and reject.
+  const bridge = new AppBridge(null, config.hostInfo, config.capabilities as any, { hostContext: config.hostContext as any });
 
   window.addEventListener('message', (event: MessageEvent) => {
     const data = event.data as RelayMessage;
@@ -115,8 +116,6 @@ function relayStart(config: BridgeConfig): void {
   };
   (bridge as any).onrequestdisplaymode = () => Promise.resolve({ mode: 'inline' });  // only inline is supported
   (bridge as any).ondownloadfile = (params: any) => rpc('download-file', params);
-
-  bridge.setHostContext(config.hostContext as any);
 
   // ── Connect: transport must listen before the View's scripts run, so the
   // iframe is inserted first but srcdoc parsing starts asynchronously. ──

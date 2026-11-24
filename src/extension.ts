@@ -9,9 +9,10 @@ import { registerWorkspaceTools, registerWebviewOpenFilePatch } from './tools/wo
 import { registerBobExtensionsTools } from './tools/bobExtensions.js';
 import { registerVideoTools } from './tools/videos.js';
 import { registerDebugAdapterTracker } from './debugAdapter.js';
-import { registerMcpApps } from './mcp/apps.js';
+import { registerMcpApps, mcpAppsEnabled } from './mcp/apps.js';
 import { installMcpShare } from './mcp/share.js';
-import { registerTaskManager, forceFirstParty, EXTENSION_ID, EXTENSION_DISPLAY_NAME, logger, isAreaEnabled, isMultiRoot } from './utils.js';
+import { installMcpCapture } from './mcp/rawResults.js';
+import { registerTaskManager, forceFirstParty, EXTENSION_ID, EXTENSION_DISPLAY_NAME, logger, isAreaEnabled } from './utils.js';
 import { registerTaskCommands, registerTaskPersistence, restoreTasks } from './taskManager.js';
 
 const BOB_EXTENSION_ID = 'IBM.bob-code';
@@ -48,9 +49,22 @@ async function migrateGlobalState(context: vscode.ExtensionContext): Promise<voi
 
 export function activate(context: vscode.ExtensionContext) {
   logger.log('Extension activating...');
-  // Must run before Bob activates (below): Bob starts MCP for every root during its own activation.
-  if (isMultiRoot()) { installMcpShare(); }
-  migrateGlobalState(context); // fire-and-forget; runs before any task restore
+  // The two MCP hooks below must be installed before Bob activates (further down): Bob creates its
+  // per-root MCP clients and starts every server during its own activation, and we can only reach
+  // those clients through an early hook (see src/mcp/clientHook.ts).
+
+  // Roots that resolve a server to the same config share one session instead of each starting its own
+  // (one process / OAuth prompt per root otherwise). Always on: with a single root it is a pass-through.
+  installMcpShare();
+
+  // Records the raw MCP tool results (structuredContent, _meta) that Bob flattens or drops, so the
+  // MCP Apps host can give Views the real result. Only needed when the MCP Apps host is enabled, and
+  // it is installed once at activation, so enabling the setting needs a window reload.
+  if (mcpAppsEnabled()) { installMcpCapture(); }
+
+  // One-time wipe of stale globalState from older versions. Fire-and-forget, but it starts here so it
+  // runs before restoreTasks() reads that state.
+  migrateGlobalState(context);
 
   // Register terminal capture
   registerTerminalCapture(context);
