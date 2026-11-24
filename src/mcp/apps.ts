@@ -47,6 +47,7 @@
 
 import * as vscode from 'vscode';
 import { getTaskManager, findTaskChatManager, getBobTool, logger } from '../utils.js';
+import { takeRawResult } from './rawResults.js';
 
 /** Sandbox attribute for the View iframe (desktop-host path, null origin). */
 const VIEW_IFRAME_SANDBOX = 'allow-scripts allow-forms allow-popups allow-modals';
@@ -58,7 +59,8 @@ const VIEW_IFRAME_SANDBOX = 'allow-scripts allow-forms allow-popups allow-modals
  */
 const VIEW_IFRAME_CSP = [
   "default-src 'none'",
-  "script-src 'unsafe-inline' 'unsafe-eval' https:",
+  "script-src 'unsafe-inline' 'unsafe-eval' https: blob:",
+  'worker-src blob: https:',
   "style-src 'unsafe-inline' https: data:",
   'img-src https: data: blob:',
   'font-src https: data:',
@@ -258,9 +260,9 @@ export function registerMcpApps(source: any, extensionUri: vscode.Uri): void {
     // Always return undefined so the tool call proceeds normally.
   });
 
-  source.onToolDidExecute((env: any, toolId: string, _args: Record<string, any>, meta: any) => {
+  source.onToolDidExecute((env: any, toolId: string, args: Record<string, any>, meta: any) => {
     if (!mcpAppsEnabled()) { return; }
-    deliverToolResult(env, toolId, meta).catch((e) => {
+    deliverToolResult(env, toolId, args, meta).catch((e) => {
       logger.warn('MCP Apps: failed to deliver tool result', e);
     });
   });
@@ -465,15 +467,32 @@ function handleRelayNotify(app: McpApp, method: string, params: any): void {
  * the ui:// resource is still being fetched) the result is buffered and sent
  * when the View reports `initialized`.
  */
-async function deliverToolResult(env: any, toolId: string, meta: any): Promise<void> {
+async function deliverToolResult(env: any, toolId: string, args: Record<string, any>, meta: any): Promise<void> {
   const taskId = meta?.taskId ?? env?.id;
   const key = appKey(taskId, toolId);
 
   // Only tools that declare a ui:// resource are relevant (avoid buffering everything).
-  const definition = getBobTool(taskId, toolId)?.getDefinition?.();
-  if (!toolUiResourceUri(definition)) { return; }
+  const bobTool = getBobTool(taskId, toolId);
+  if (!toolUiResourceUri(bobTool?.getDefinition?.())) { return; }
 
-  // The tool message may not be in the chat history yet when the hook fires.
+  const send = (params: { content: unknown[]; structuredContent?: unknown }) => {
+    const app = activeApps.get(key);
+    if (app?.viewReady) {
+      postToBridge(app, { __bobPtBridge: true, kind: 'command', cmd: 'tool-result', params });
+    } else {
+      pendingResults.set(key, params);
+    }
+  };
+
+  // Preferred: the raw MCP result (structuredContent and _meta intact).
+  const raw = takeRawFor(bobTool, args);
+  if (raw) {
+    logger.log(`MCP Apps: raw tool result for ${key}: structuredContent ${raw.structuredContent !== undefined ? 'present' : 'absent'}`);
+    send(rawToParams(raw));
+    return;
+  }
+
+  // Fallback: Bob's flattened text. The tool message may not be in the chat history yet when the hook fires.
   let text: string | undefined;
   for (let attempt = 0; attempt < RESULT_LOOKUP_ATTEMPTS; attempt++) {
     text = readLastToolResult(taskId, toolId);
@@ -492,17 +511,26 @@ async function deliverToolResult(env: any, toolId: string, meta: any): Promise<v
     `text=${safeJson(text, 300)}`,
   );
 
-  const params = {
+  send({
     content: [{ type: 'text', text }],
     ...(structuredContent !== undefined && { structuredContent }),
-  };
+  });
+}
 
-  const app = activeApps.get(key);
-  if (app?.viewReady) {
-    postToBridge(app, { __bobPtBridge: true, kind: 'command', cmd: 'tool-result', params });
-  } else {
-    pendingResults.set(key, params);
-  }
+function takeRawFor(tool: any, args: unknown): any {
+  const server = tool?.serverName ?? tool?.mcpInfo?.serverName;
+  const name = tool?.toolName ?? tool?.mcpInfo?.toolName;
+  return server && name ? takeRawResult(server, name, args) : undefined;
+}
+
+function rawToParams(raw: any): { content: unknown[]; structuredContent?: unknown } {
+  const { content, structuredContent, _meta, isError } = raw;
+  return {
+    content: Array.isArray(content) ? content : [],
+    ...(structuredContent !== undefined && { structuredContent }),
+    ...(_meta !== undefined && { _meta }),
+    ...(isError && { isError }),
+  };
 }
 
 /**
@@ -616,6 +644,9 @@ async function proxyToolCall(app: McpApp, toolName: string, args: Record<string,
       return 'bob-powertoys://captured';
     },
   });
+
+  const rawResult = takeRawFor(tool, args);
+  if (rawResult) { return rawToParams(rawResult); }
 
   const raw = fullOutput ?? text;
   const structuredContent = raw !== undefined ? extractStructuredContent(raw) : undefined;

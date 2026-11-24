@@ -10,7 +10,9 @@ bob-powertoys/
 │   ├── debugAdapter.ts           # Centralized debug adapter tracker
 │   ├── utils.ts                  # Shared utilities: taskManager access, frame resolution, forceFirstParty
 │   ├── mcp/
+│   │   ├── clientHook.ts         # Early hook on Bob's per-root MCPClient; listeners: share.ts, rawResults.ts
 │   │   ├── share.ts              # Shares MCP sessions across workspace roots (see "MCP session sharing")
+│   │   ├── rawResults.ts         # Records raw MCP tool results (structuredContent/_meta) for the MCP Apps host
 │   │   ├── apps.ts               # Experimental MCP Apps host: ui:// views in a side panel (see "MCP Apps host")
 │   │   └── appBridge.ts         # Browser bundle for the app panel: official AppBridge + relay (built to out/mcp/appBridge.js)
 │   └── tools/                    # Individual tool modules
@@ -211,9 +213,9 @@ The warning above is still logged after a successful override: it is emitted fro
 
 Bob's `McpHub` keeps one registry (`workspaceRegistries`, keyed by workspace root) and one `MCPClient` per root. At startup the runtime does `Promise.all(workspaces.map(initWorkspace))`, so every global server in `~/.bob/settings/mcp.json` is started once per folder. `resolveServerConfigForWorkspace` adds `roots: [<this folder>]` and expands `${workspaceFolder}`, so Bob cannot assume two roots run the same server. In a 5-folder workspace a single global OAuth server logs `[mcp-use] info: Authentication required` five times.
 
-[`src/mcpShare.ts`](src/mcpShare.ts) makes roots whose server config is identical share one session. It has to run **before** Bob starts MCP, and that happens during Bob's own activation. The `McpHub` is not reachable that early, so it hooks objects Bob creates per root instead of the hub:
+[`src/mcp/share.ts`](src/mcp/share.ts) makes roots whose server config is identical share one session. It has to run **before** Bob starts MCP, and that happens during Bob's own activation. The `McpHub` is not reachable that early, so it hooks objects Bob creates per root instead of the hub. That hook lives in [`src/mcp/clientHook.ts`](src/mcp/clientHook.ts) and is generic: listeners registered with `onMcpClient()` receive every `MCPClient` Bob creates (share.ts and rawResults.ts are the two users).
 
-1. **`installMcpShare()`** is the first call in `activate()`, before `bobExtension.activate()`, and only when the workspace has more than one root folder (`isMultiRoot()`). The decision is made once at activation: adding a second folder to a single-folder window needs a window reload before sharing applies. It installs an `Object.prototype` accessor for `startupComplete`. Bob's `startupForWorkspace` assigns `registry.startupComplete = true` right before it creates `registry.client`. The setter turns it back into an ordinary own property, so nothing else is affected. If the object looks like a registry (`serversByKey` is a `Map` and it has a `client` key), `registry.client` gets an accessor so every client Bob assigns is passed to `shareClient(client, registry.scopeRoot)`.
+1. **`installMcpShare()`** is the first call in `activate()`, before `bobExtension.activate()`, and always (single-root windows have only one client, so sharing is a no-op; this also means adding a second folder needs no reload). It registers `shareClient` as a listener and calls `installMcpClientHook()`, which installs an `Object.prototype` accessor for `startupComplete`. Bob's `startupForWorkspace` assigns `registry.startupComplete = true` right before it creates `registry.client`. The setter turns it back into an ordinary own property, so nothing else is affected. If the object looks like a registry (`serversByKey` is a `Map` and it has a `client` key), `registry.client` gets an accessor so every client Bob assigns is passed to the listeners with `registry.scopeRoot`.
 2. **`shareClient()`** replaces `client.createSession(name, false)`, the call Bob makes in `startServerSession`. The key is `name` plus the server config with `roots`, `errlog`, `onElicitation` and `authProvider` removed. The first root registers its pending session synchronously, so roots started in parallel join it instead of connecting. Bob then calls `session.initialize()` and loads tools per root as usual.
 
 Lifecycle of a shared session:
@@ -261,19 +263,20 @@ The protocol layer is **not** hand-rolled: `AppBridge` from `@modelcontextprotoc
 
 - `onToolWillExecute(env, toolId, args)` fires before MCP tool execution and can return `undefined` to let the call proceed — our capture point for tool input.
 - `onToolDidExecute(env, toolId, args, meta)` (`handleToolResult` in extension.js) fires with `{...toolMetadata, taskId}` — our capture point for completion.
-- MCP results are flattened by `runToolWithRestart`: `[...textItems, JSON.stringify(structuredContent)].join('  ')` — `extractStructuredContent()` recovers the structured payload by scanning double-space boundaries from the end.
+- MCP results are flattened by `runToolWithRestart`: `[...textItems, JSON.stringify(structuredContent)].join('  ')` — `extractStructuredContent()` recovers the structured payload by scanning double-space boundaries from the end. **The Insiders build only serializes `structuredContent` when the tool returned no text, and always drops `_meta`**, so the flattened text is not enough for Views like cohort-heatmap (render from `structuredContent`) or the map (needs `_meta.viewUUID`).
+- To get the real result, [`src/mcp/rawResults.ts`](src/mcp/rawResults.ts) wraps `callTool` on every session Bob creates (via `clientHook.ts`, installed by `installMcpCapture()` when `bob-powertoys.mcpApps.enabled` is on at activation — reload the window after enabling) and keeps the last 5 results per server. `deliverToolResult()` and `proxyToolCall()` take the matching raw result (`takeRawResult(server, tool, args)`) and fall back to the flattened text when none was recorded.
 - `read_mcp_resource` pushes `JSON.stringify({contents: [{uri, mimeType, text}]})` — the resource HTML is cleanly parseable, but the contents' `_meta` (CSP domains) is dropped.
 
 ### Known limitations / TODOs
 
 - **Capability negotiation**: Bob's MCP client does not advertise `io.modelcontextprotocol/ui` during initialize, so strictly conforming servers may omit `_meta.ui`. Servers that always include it (most of the current ecosystem) work. A fix would require patching the session initialize request.
-- **CSP**: the app iframe uses a permissive default CSP because the resource `_meta.ui.csp` is dropped by `read_mcp_resource`. Phase 2: read resources directly on the MCP session (needs session access like mcpShare's) to preserve `_meta`.
+- **CSP**: the app iframe uses a permissive default CSP because the resource `_meta.ui.csp` is dropped by `read_mcp_resource`. Phase 2: read resources directly on the MCP session (needs session access via `clientHook.ts`) to preserve `_meta`. `script-src` includes `blob:` and `worker-src blob: https:` is set explicitly, otherwise Cesium-style Views cannot start their web workers.
 - **`visibility: ["app"]` tools are not hidden from the model** (Bob does not filter them) — we enforce visibility only for View-initiated calls.
 - `ui/update-model-context` is stored but not yet surfaced to the model in the next turn.
 - `ui/notifications/tool-input-partial` and `tool-cancelled` are not sent.
 - One panel per `(taskId, toolId)`; a repeated call replaces the previous panel.
 
-Gated on `bob-powertoys.mcpApps.enabled` (default `false`, read at call time — inert unless an Apps server is configured). Tests: [`test/mcp/apps.test.ts`](test/mcp/apps.test.ts).
+Gated on `bob-powertoys.mcpApps.enabled` (default `false`, read at call time, except the raw-result capture hook, which is installed at activation and needs a window reload; inert unless an Apps server is configured). Tests: [`test/mcp/apps.test.ts`](test/mcp/apps.test.ts).
 
 ---
 
@@ -516,6 +519,7 @@ The pure functions `shouldStripFilePathUsage(params, args, env, folders)`, `reso
 
 - Paths resolve exactly like Bob's `vs()`: a leading `~` expands to the home directory, then `path.resolve(env.workspace, value)`.
 - The strip only fires when **every** provided `filePath` value is inside a workspace folder; any genuinely-outside value keeps the whole call native.
+- With several pending calls of the same tool (parallel calls), the strip only fires when **all** of them qualify — the real call is among them, so this is safe; at worst an outside sibling call makes an inside call prompt.
 - Paths inside `~/.bob` never strip, so Bob's `isBobHomeWrite` protection stays intact.
 - Directory containment is case-insensitive on Windows and requires `fsPath + path.sep` prefix (no `/src/backend` vs `/src/backend-v2` collisions).
 

@@ -209,8 +209,12 @@ export interface PendingToolCall {
   args: Record<string, any>;
 }
 
-/** taskId → arguments of the most recent tool call on that task. */
-const pendingToolArgs = new Map<string, PendingToolCall>();
+/**
+ * taskId → arguments of the tool calls recorded but not yet finished on that
+ * task. A list, not one slot: parallel tool calls in one assistant message are
+ * all recorded (synchronously) before any of them reaches the sandbox check.
+ */
+const pendingToolArgs = new Map<string, PendingToolCall[]>();
 
 /** Prototypes of built-in tool classes we have already wrapped. */
 // Prototypes are class-wide and live for the whole session, so a plain Set
@@ -220,9 +224,9 @@ const patchedPrototypes = new Set<object>();
 /** True once the one-time "applied" log line has been emitted. */
 let patchLogged = false;
 
-/** Stashed arguments of the most recent tool call on a task, if any. */
-export function getPendingToolArgs(taskId: unknown): PendingToolCall | undefined {
-  return typeof taskId === 'string' ? pendingToolArgs.get(taskId) : undefined;
+/** Stashed arguments of the unfinished tool calls on a task. */
+export function getPendingToolArgs(taskId: unknown): readonly PendingToolCall[] {
+  return (typeof taskId === 'string' && pendingToolArgs.get(taskId)) || [];
 }
 
 function getFolders(): readonly vscode.WorkspaceFolder[] {
@@ -353,6 +357,14 @@ function patchMethod(obj: any, name: string, makeWrapper: (original: any) => any
  * were not active earlier.
  */
 export function installMultiRootSandboxPatch(source: any): void {
+  // Drop a finished call so it cannot veto later strips of the same tool.
+  source.onToolDidExecute((_env: any, toolId: string, args: any, meta: any) => {
+    const list = pendingToolArgs.get(meta?.taskId);
+    const key = JSON.stringify(args);
+    const i = list?.findIndex(c => c.toolId === toolId && JSON.stringify(c.args) === key) ?? -1;
+    if (i >= 0) { list!.splice(i, 1); }
+  });
+
   source.onTurnStart((taskId: string) => {
     // Fresh turn — arguments stashed during previous turns are stale.
     pendingToolArgs.clear();
@@ -376,7 +388,9 @@ function patchForTask(task: any): void {
     function (this: any, toolCall: any) {
       try {
         if (toolCall?.name && toolCall?.arguments && typeof toolCall.arguments === 'object') {
-          pendingToolArgs.set(this?.id, { toolId: toolCall.name, args: toolCall.arguments });
+          const list = pendingToolArgs.get(this?.id) ?? [];
+          list.push({ toolId: toolCall.name, args: toolCall.arguments });
+          pendingToolArgs.set(this?.id, list);
         }
       } catch { /* non-fatal: worst case Bob applies its native check */ }
       return original.call(this, toolCall);
@@ -402,9 +416,14 @@ function patchTool(tool: any): void {
     function (this: any, env?: any) {
       const params = original.call(this, env);
       if (!isMultiRoot() || !Array.isArray(params)) { return params; }
-      const pending = getPendingToolArgs(env?.id);
-      if (!pending || pending.toolId !== (this.id ?? this.getId?.())) { return params; }
-      if (!shouldStripFilePathUsage(params, pending.args, env, getFolders())) { return params; }
+      // getParameters only receives env, not the call id, so with parallel calls
+      // we cannot tell which pending call this is: strip only if ALL pending
+      // calls of this tool qualify (the real one is among them, so it is safe).
+      const toolId = this.id ?? this.getId?.();
+      const pending = getPendingToolArgs(env?.id).filter(c => c.toolId === toolId);
+      if (pending.length === 0) { return params; }
+      const folders = getFolders();
+      if (!pending.every(c => shouldStripFilePathUsage(params, c.args, env, folders))) { return params; }
       return params.map(p => p?.usage === 'filePath' ? { ...p, usage: undefined } : p);
     });
 

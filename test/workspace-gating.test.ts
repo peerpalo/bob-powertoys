@@ -20,12 +20,15 @@ function setFolders(count: 0 | 1 | 2) {
 function fakeSource() {
   const tools: any[] = [];
   const turnStartCallbacks: Array<(taskId: string, envs: any, isEmpty: boolean) => void> = [];
+  const didExecuteCallbacks: Array<(env: any, toolId: string, args: any, meta: any) => void> = [];
   return {
     tools,
     turnStart: (...a: [string, any, boolean]) => { for (const cb of turnStartCallbacks) { cb(...a); } },
     registerTool: (t: any) => tools.push(t),
     // Real Bob supports multiple onTurnStart listeners — keep them all.
     onTurnStart: (cb: (taskId: string, envs: any, isEmpty: boolean) => void) => { turnStartCallbacks.push(cb); },
+    onToolDidExecute: (cb: (env: any, toolId: string, args: any, meta: any) => void) => { didExecuteCallbacks.push(cb); },
+    didExecute: (...a: [any, string, any, any]) => { for (const cb of didExecuteCallbacks) { cb(...a); } },
   };
 }
 
@@ -121,6 +124,36 @@ describe('multi-root sandbox patch (onTurnStart)', () => {
     task.recordToolCallArguments({ name: 'read_file', id: 'c1', arguments: { path: nodePath.join(secondary, 'a.txt') } });
     const params = tool.getParameters({ id: 'task-1', workspace: primary });
     expect(params[0].usage).toBeUndefined();  // in a workspace folder → tag stripped
+  });
+
+  it('strips with parallel calls of other tools pending, but not when a same-tool call is outside', async () => {
+    const { FakeReadFileTool } = await loadFixtureClasses();
+    const tool = new FakeReadFileTool();
+    const task = {
+      id: 'task-3',
+      getTools: () => [tool],
+      recordToolCallArguments(tc: any) { return tc; },
+    };
+    await installFakeTask('task-3', task);
+
+    const src = fakeSource();
+    registerWorkspaceTools(src);
+    src.turnStart('task-3', {}, true);
+    const env = { id: 'task-3', workspace: primary };
+    const inside = { path: nodePath.join(secondary, 'a.txt') };
+    const outside = { path: nodePath.join(nodePath.dirname(primary), 'elsewhere', 'b.txt') };
+
+    // Bob records every parallel call before any reaches the sandbox check.
+    task.recordToolCallArguments({ name: 'read_file', id: 'c1', arguments: inside });
+    task.recordToolCallArguments({ name: 'grep', id: 'c2', arguments: outside });
+    expect(tool.getParameters(env)[0].usage).toBeUndefined();
+
+    task.recordToolCallArguments({ name: 'read_file', id: 'c3', arguments: outside });
+    expect(tool.getParameters(env)[0].usage).toBe('filePath');
+
+    // Once the outside call finishes it no longer vetoes the strip.
+    src.didExecute({}, 'read_file', outside, { taskId: 'task-3' });
+    expect(tool.getParameters(env)[0].usage).toBeUndefined();
   });
 
   it('is a pass-through in a single-root workspace (gate evaluated at call time)', async () => {

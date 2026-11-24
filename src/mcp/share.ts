@@ -1,4 +1,5 @@
 import { logger } from '../utils.js';
+import { onMcpClient, installMcpClientHook } from './clientHook.js';
 
 /**
  * Share one MCP session across workspace roots.
@@ -104,24 +105,6 @@ let installed = false;
 export function installMcpShare(): void {
   if (installed) { return; }
   installed = true;
-  Object.defineProperty(Object.prototype, 'startupComplete', {
-    configurable: true,
-    get() { return undefined; },
-    set(this: any, value: unknown) {
-      // Behave like a normal assignment for everything that is not a Bob registry.
-      Object.defineProperty(this, 'startupComplete', { value, writable: true, configurable: true, enumerable: true });
-      if (this.serversByKey instanceof Map && 'client' in this) { hookRegistry(this); }
-    },
-  });
-}
-
-function hookRegistry(registry: any): void {
-  let client = registry.client;
-  Object.defineProperty(registry, 'client', {
-    configurable: true,
-    enumerable: true,
-    get: () => client,
-    set: (v) => { client = v; shareClient(v, registry.scopeRoot); },
-  });
-  shareClient(client, registry.scopeRoot);
+  onMcpClient(shareClient);
+  installMcpClientHook();
 }
