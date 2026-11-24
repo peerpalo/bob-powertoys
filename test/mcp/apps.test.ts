@@ -78,6 +78,7 @@ describe('extractStructuredContent', () => {
 // ─── buildAppPanelDocument ───────────────────────────────────────────────────
 
 describe('buildAppPanelDocument', () => {
+  const cspSource = 'vscode-webview:';
   const config = {
     appHtml: '<script>alert("hi")</script><b>app</b>',
     hostInfo: { name: 'bob-powertoys', version: '0.1.0' },
@@ -85,6 +86,7 @@ describe('buildAppPanelDocument', () => {
     hostContext: { theme: 'dark' },
     sandbox: 'allow-scripts',
     csp: "default-src 'none'",
+    webviewCspSource: cspSource,
   };
   const html = buildAppPanelDocument(config, 'https://webview-cdn.vscode-cdn.net/mcp/appBridge.js', 'My App');
 
@@ -107,6 +109,14 @@ describe('buildAppPanelDocument', () => {
     expect(parsed.sandbox).toBe('allow-scripts');
     expect(parsed.csp).toBe("default-src 'none'");
     expect(parsed.appHtml).toContain('<b>app</b>');
+  });
+
+  it('host document script-src is locked to webviewCspSource (no https: wildcard for scripts)', () => {
+    const cspMatch = html.match(/http-equiv="Content-Security-Policy" content="([^"]+)"/);
+    const csp = cspMatch?.[1] ?? '';
+    expect(csp).toContain(`script-src 'unsafe-inline' ${cspSource}`);
+    // script-src must not widen to https: — other directives may allow https: for the iframe
+    expect(csp).not.toMatch(/script-src[^;]*https:/);
   });
 
   it('escapes the title', () => {
