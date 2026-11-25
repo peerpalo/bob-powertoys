@@ -2,9 +2,8 @@
  * Utility functions for PowerToys for Bob tools
  */
 
-export const EXTENSION_ID = 'bob-powertoys';
-export const EXTENSION_DISPLAY_NAME = 'PowerToys for Bob';
-export const LOG_PREFIX = `[${EXTENSION_DISPLAY_NAME}]`;
+import { LOG_PREFIX } from './consts.js';
+export * from './consts.js';
 
 export const logger = {
   log:   (msg: string, ...args: unknown[]) => console.log(`${LOG_PREFIX} ${msg}`, ...args),

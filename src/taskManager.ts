@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
-import { getTaskManager, EXTENSION_ID, logger } from './utils.js';
+import { getTaskManager, logger } from './utils.js';
+import { EXTENSION_ID } from './consts.js';
 
 // Keys are suffixed with the workspace folder path so tasks from different
 // workspaces never bleed into each other.

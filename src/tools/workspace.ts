@@ -376,7 +376,7 @@ export function installMultiRootSandboxPatch(source: any): void {
       const task = cm?.currentTask;
       if (task) { patchForTask(task); }
     } catch (e) {
-      logger.warn('multi-root sandbox patch: refresh failed', e);
+      logger.warn('Multi-root sandbox patch: refresh failed', e);
     }
   });
 }
@@ -472,7 +472,7 @@ function patchTool(tool: any): void {
   }
 
   if (!patchLogged && patchedPrototypes.size > 0) {
-    logger.log(`multi-root sandbox patch: applied to ${patchedPrototypes.size} built-in tool class(es)`);
+    logger.log(`Multi-root sandbox patch: applied to ${patchedPrototypes.size} built-in tool class(es)`);
     patchLogged = true;
   }
 }

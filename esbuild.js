@@ -41,7 +41,7 @@ const extensionOptions = {
  * Bundles the official @modelcontextprotocol/ext-apps AppBridge; loaded by
  * the panel document via webview.asWebviewUri(). Must NOT import 'vscode'.
  * @type {import('esbuild').BuildOptions} */
-const bridgeOptions = {
+const mcpAppBridgeOptions = {
   entryPoints: ['src/mcp/appBridge.ts'],
   bundle: true,
   outfile: 'out/mcp/appBridge.js',
@@ -59,10 +59,10 @@ async function main() {
     const ctx = await esbuild.context(extensionOptions);
     await ctx.watch();
     // The bridge bundle changes rarely — build it once per watch session.
-    await esbuild.build({ ...bridgeOptions, logLevel: 'info' });
+    await esbuild.build({ ...mcpAppBridgeOptions, logLevel: 'info' });
   } else {
     await esbuild.build({ ...extensionOptions, logLevel: 'info' });
-    await esbuild.build({ ...bridgeOptions, logLevel: 'info' });
+    await esbuild.build({ ...mcpAppBridgeOptions, logLevel: 'info' });
   }
 }
 

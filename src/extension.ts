@@ -12,12 +12,9 @@ import { registerDebugAdapterTracker } from './debugAdapter.js';
 import { registerMcpApps, mcpAppsEnabled } from './mcp/apps.js';
 import { installMcpShare } from './mcp/share.js';
 import { installMcpCapture } from './mcp/rawResults.js';
-import { registerTaskManager, forceFirstParty, EXTENSION_ID, EXTENSION_DISPLAY_NAME, logger, isAreaEnabled } from './utils.js';
+import { registerTaskManager, forceFirstParty, logger, isAreaEnabled } from './utils.js';
 import { registerTaskCommands, registerTaskPersistence, restoreTasks } from './taskManager.js';
-
-const BOB_EXTENSION_ID = 'IBM.bob-code';
-const SHOW_STATUS_COMMAND = `${EXTENSION_ID}.showStatus`;
-const RELOAD_COMMAND = `${EXTENSION_ID}.reload`;
+import { BOB_EXTENSION_ID, EXTENSION_ID, EXTENSION_DISPLAY_NAME, SHOW_STATUS_COMMAND, RELOAD_COMMAND } from './consts.js';
 
 let statusBarItem: vscode.StatusBarItem;
 let registeredTools: any[] = [];
@@ -163,6 +160,7 @@ async function registerPowerToys(context: vscode.ExtensionContext, bobExports: a
     registerBobExtensionsTools(source);                   // 1 tool
     registerVideoTools(source);                           // 1 tool
     registerMcpApps(source, context.extensionUri);        // experimental MCP Apps host (ui:// resources → panel)
+
     logger.log(`Successfully registered ${registeredTools.length} tools with Bob`);
 
     await completeRegisterPowerToys(context, bobExports, source);
